@@ -36,7 +36,8 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 
 **Gallery**
 - Thumbnail strip of everything in the save folder, kept in sync with the disk
-- Select several shots (<kbd>Ctrl</kbd>/<kbd>Shift</kbd>-click, <kbd>Ctrl</kbd>+<kbd>A</kbd>) to compare them side by side
+- **Select** several shots the easy way: press **Select** (or click the round check on any thumbnail), then click or swipe over thumbnails. Delete removes them all at once with the same PC only / PC + phone prompt. <kbd>Ctrl</kbd>+<kbd>A</kbd> selects all, <kbd>Esc</kbd> stops
+- Selected shots are shown side by side to compare them
 - Smooth fullscreen viewer that hides its controls while you look
 - Copy any image with <kbd>Ctrl</kbd>+<kbd>C</kbd>, the right-click menu, or by dragging it into another app. It pastes as an image in chat apps and as a file in Explorer
 - Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**
@@ -81,6 +82,7 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 | <kbd>Esc</kbd> | Leave fullscreen |
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
 | <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots |
+| <kbd>Esc</kbd> | Stop selecting |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy |
 | <kbd>Delete</kbd> | Delete (asks PC only or PC + phone) |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open the screenshots folder |

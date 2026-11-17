@@ -31,6 +31,7 @@ class Glyph:
     PASTE = "\ue77f"
     SETTINGS = "\ue713"
     CHEVRON_DOWN = "\ue70d"
+    MULTISELECT = "\ue762"
     UNLOCK = "\ue785"
 
 

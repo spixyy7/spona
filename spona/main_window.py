@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
             lambda position: self._show_image_menu(self._gallery.selected_paths(), position)
         )
         self._gallery.activated_path.connect(lambda _path: self.toggle_fullscreen())
+        self._gallery.selection_mode_changed.connect(self._on_selection_mode_changed)
 
         bottom = QFrame()
         bottom.setObjectName("bottombar")
@@ -230,6 +231,19 @@ class MainWindow(QMainWindow):
         self._auto_copy_button.setChecked(bool(self._settings.get("auto_copy", False)))
         self._info_label = ElidedLabel()
         self._info_label.setObjectName("muted")
+        self._select_button = tool_button(
+            Glyph.MULTISELECT,
+            "\n".join(
+                (
+                    "Select several screenshots",
+                    "Click or swipe over thumbnails, then press Delete",
+                    "Ctrl+A selects all, Esc stops",
+                )
+            ),
+            self._toggle_select_mode,
+            text="Select",
+        )
+        self._select_button.setCheckable(True)
         self._copy_button = tool_button(Glyph.COPY, "Copy image (Ctrl+C)", self.copy_selected)
         self._delete_button = tool_button(
             Glyph.DELETE, "Delete selected images (Delete), they go to the Recycle Bin", self.delete_selected
@@ -245,6 +259,7 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self._auto_copy_button)
         bottom_layout.addSpacing(8)
         bottom_layout.addWidget(self._info_label, 1)
+        bottom_layout.addWidget(self._select_button)
         bottom_layout.addWidget(self._copy_button)
         bottom_layout.addWidget(self._delete_button)
         bottom_layout.addWidget(self._marker_button)
@@ -268,7 +283,8 @@ class MainWindow(QMainWindow):
             (("Ctrl+L",), self.change_folder),
             (("Ctrl+U",), self.unlock_selected),
             (("M",), self.open_marker),
-            (("Ctrl+A",), self._gallery.selectAll),
+            (("Ctrl+A",), self._gallery.select_all),
+            (("Escape",), self._leave_selection),
             (("Left", "Up"), lambda: self._step(-1)),
             (("Right", "Down"), lambda: self._step(1)),
             (("Home",), lambda: self._gallery.go(0)),
@@ -760,6 +776,23 @@ class MainWindow(QMainWindow):
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
+    def _toggle_select_mode(self, checked: bool = False) -> None:
+        enabled = self._select_button.isChecked()
+        self._gallery.set_selection_mode(enabled)
+        if enabled:
+            self._notify("Click or swipe over thumbnails to select  ·  Delete removes them all", "info", 2600)
+
+    def _on_selection_mode_changed(self, enabled: bool) -> None:
+        self._select_button.blockSignals(True)
+        self._select_button.setChecked(enabled)
+        self._select_button.blockSignals(False)
+
+    def _leave_selection(self) -> None:
+        if self._gallery.selection_mode:
+            self._gallery.set_selection_mode(False)
+        elif len(self._selected_paths) > 1:
+            self._gallery.go(max(0, self._gallery.currentRow()))
+
     def delete_selected(self) -> None:
         self.delete_paths(self._selected_paths)
 
@@ -787,6 +820,7 @@ class MainWindow(QMainWindow):
             self._loader.forget(path)
             self._annotations.forget(path)
         self._gallery.remove_paths(deleted)
+        self._gallery.set_selection_mode(False)
         phone_jobs = {path: on_phone[path] for path in deleted if path in on_phone} if also_phone else {}
         self._origins.forget(deleted)
         if len(deleted) < len(paths):

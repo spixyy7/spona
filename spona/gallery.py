@@ -1,17 +1,30 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QFileSystemWatcher, QItemSelectionModel, QPropertyAnimation, QRectF, QSize, QSizeF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDrag, QPainter, QPen, QPixmap
+from PySide6.QtCore import (
+    QEasingCurve,
+    QFileSystemWatcher,
+    QItemSelectionModel,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    QSizeF,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QColor, QDrag, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QStyle, QStyledItemDelegate
 
 from .images import IMAGE_SUFFIXES, ImageLoader, file_mime, rounded
-from .theme import ACCENT, ACCENT_TINT, MUTED, SURFACE_HIGH
+from .theme import ACCENT, ACCENT_DARK, ACCENT_TINT, MUTED, SURFACE_HIGH
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
 THUMB_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 THUMB_SIZE = QSize(56, 102)
 CELL_SIZE = QSize(74, 120)
+CHECK_RADIUS = 8.5
 
 
 def scan_images(folder: Path) -> list[str]:
@@ -67,7 +80,36 @@ class ThumbDelegate(QStyledItemDelegate):
             size.height(),
         )
         painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        if self._gallery.selection_mode or hovered or (selected and self._gallery.multiple_selected()):
+            self._paint_check(painter, check_center(option.rect), selected)
         painter.restore()
+
+    @staticmethod
+    def _paint_check(painter, center: QPointF, selected: bool) -> None:
+        radius = CHECK_RADIUS
+        if selected:
+            painter.setPen(QPen(QColor(ACCENT_DARK), 1))
+            painter.setBrush(QColor(ACCENT))
+        else:
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+            painter.setBrush(QColor(0, 0, 0, 120))
+        painter.drawEllipse(center, radius, radius)
+        if selected:
+            painter.setPen(
+                QPen(QColor(ACCENT_DARK), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            mark = QPainterPath(QPointF(center.x() - 3.6, center.y() + 0.2))
+            mark.lineTo(center.x() - 1.0, center.y() + 2.8)
+            mark.lineTo(center.x() + 3.8, center.y() - 2.6)
+            painter.drawPath(mark)
+
+
+def check_center(rect) -> QPointF:
+    cell = QRectF(rect).adjusted(3, 3, -3, -3)
+    return QPointF(cell.right() - CHECK_RADIUS - 3, cell.top() + CHECK_RADIUS + 3)
 
 
 class Gallery(QListWidget):
@@ -75,6 +117,7 @@ class Gallery(QListWidget):
     contents_changed = Signal()
     context_requested = Signal(object)
     activated_path = Signal(str)
+    selection_mode_changed = Signal(bool)
 
     def __init__(self, loader: ImageLoader, parent=None):
         super().__init__(parent)
@@ -84,6 +127,8 @@ class Gallery(QListWidget):
         self._items: dict[str, QListWidgetItem] = {}
         self._thumbs: dict[str, QPixmap] = {}
         self._folder: Path | None = None
+        self.selection_mode = False
+        self._swipe_select: bool | None = None
         self.placeholder = self._make_placeholder()
         self.setItemDelegate(ThumbDelegate(self))
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -147,6 +192,7 @@ class Gallery(QListWidget):
         self.setCurrentRow(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
     def load_folder(self, folder: Path) -> None:
+        self.set_selection_mode(False)
         self._folder = Path(folder)
         self._watch(reset=True)
         self.blockSignals(True)
@@ -271,6 +317,84 @@ class Gallery(QListWidget):
         if self._folder is not None and self._folder.is_dir() and str(self._folder) not in watched:
             self._watcher.addPath(str(self._folder))
 
+    def multiple_selected(self) -> bool:
+        return len(self.selectionModel().selectedIndexes()) > 1
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        if enabled == self.selection_mode:
+            return
+        self.selection_mode = enabled
+        self.setDragEnabled(not enabled)
+        if not enabled and self.multiple_selected():
+            current = self.currentRow()
+            row = current if current >= 0 else self.row(self.selectedItems()[0])
+            self.setCurrentRow(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self.viewport().update()
+        self.selection_mode_changed.emit(enabled)
+
+    def select_all(self) -> None:
+        if not self.count():
+            return
+        self.set_selection_mode(True)
+        self.selectAll()
+
+    def _toggle_item(self, item: QListWidgetItem, selected: bool | None = None) -> None:
+        index = self.indexFromItem(item)
+        model = self.selectionModel()
+        if selected is None:
+            flag = QItemSelectionModel.SelectionFlag.Toggle
+        elif selected:
+            flag = QItemSelectionModel.SelectionFlag.Select
+        else:
+            flag = QItemSelectionModel.SelectionFlag.Deselect
+        model.select(index, flag)
+        model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def _on_check(self, item: QListWidgetItem, position) -> bool:
+        center = check_center(self.visualItemRect(item))
+        dx = position.x() - center.x()
+        dy = position.y() - center.y()
+        return dx * dx + dy * dy <= (CHECK_RADIUS + 5) ** 2
+
+    def mousePressEvent(self, event):
+        position = event.position()
+        item = self.itemAt(position.toPoint())
+        modifiers = event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        if event.button() == Qt.MouseButton.LeftButton and item is not None and not modifiers:
+            if self.selection_mode or self._on_check(item, position):
+                if not self.selection_mode:
+                    self.blockSignals(True)
+                    self.clearSelection()
+                    self.blockSignals(False)
+                    self.set_selection_mode(True)
+                self._toggle_item(item)
+                self._swipe_select = item.isSelected()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._swipe_select is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None and item.isSelected() != self._swipe_select:
+                self._toggle_item(item, self._swipe_select)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._swipe_select is not None:
+            self._swipe_select = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.selection_mode:
+            self.mousePressEvent(event)
+            return
+        super().mouseDoubleClickEvent(event)
+
     def _on_context_menu(self, position) -> None:
         item = self.itemAt(position)
         if item is None:
@@ -291,6 +415,7 @@ class Gallery(QListWidget):
         drag.exec(Qt.DropAction.CopyAction)
 
     def _on_selection_changed(self) -> None:
+        self.viewport().update()
         current = self.currentItem()
         if current is not None and current.isSelected():
             self._scroll_to(current)
