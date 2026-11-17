@@ -17,10 +17,20 @@ from .icons import Glyph, glyph_icon
 from .images import ImageLoader, file_mime, side_by_side
 from .settings import APP_NAME, Settings
 from .theme import ACCENT_DARK, style_title_bar
+from .annotations import AnnotationStore, Brush, render_annotated
+from .naming import release_path, reserve_path, safe_name
 from .vault import Vault
 from .viewer import FullscreenViewer, ImageView
 from .widgets import ElidedLabel, Toast, separator, tool_button
-from .workers import CaptureSignals, CaptureTask, DeviceMonitor, LockTask, ScreenSignals, UnlockTask
+from .workers import (
+    CaptureSignals,
+    CaptureTask,
+    DeviceMonitor,
+    LockTask,
+    PhoneScreenshotWatcher,
+    ScreenSignals,
+    UnlockTask,
+)
 
 MAX_SIDE_BY_SIDE = 8
 TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
@@ -30,11 +40,6 @@ FILE_PATTERN = re.compile(r"^Screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_(?P<
 def default_folder() -> Path:
     pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
     return Path(pictures or Path.home() / "Pictures") / APP_NAME
-
-
-def safe_name(text: str) -> str:
-    cleaned = re.sub(r"[^\w.-]+", "-", text).strip("-.")
-    return cleaned or "phone"
 
 
 def human_size(size: int) -> str:
@@ -107,6 +112,9 @@ class MainWindow(QMainWindow):
         self._screen_busy: dict[str, tuple[str | None, bool, bool]] = {}
         self._secret_queue: list[str] = []
         self._asking_secret = False
+        self._annotations = AnnotationStore()
+        self._brush = Brush.from_dict(settings.get("marker"))
+        self._receiver: PhoneScreenshotWatcher | None = None
         self._build_ui()
         self._bind_shortcuts()
         self._restore_geometry()
@@ -146,6 +154,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self._change_button)
 
         self._viewer = ImageView(framed=True)
+        self._viewer.store = self._annotations
         self._connect_view(self._viewer)
         self._toast = Toast(self._viewer)
 
@@ -176,11 +185,22 @@ class MainWindow(QMainWindow):
             self.unlock_selected,
             text="Unlock",
         )
+        self._receive_button = tool_button(
+            Glyph.DOWNLOAD,
+            "Auto-receive\nWhen on, every screenshot you take on the phone itself\nis sent to this PC and shown here automatically",
+            self._toggle_auto_receive,
+            text="Auto-receive",
+        )
+        self._receive_button.setCheckable(True)
+        self._receive_button.setChecked(bool(self._settings.get("auto_receive", False)))
         self._info_label = ElidedLabel()
         self._info_label.setObjectName("muted")
         self._copy_button = tool_button(Glyph.COPY, "Copy image (Ctrl+C)", self.copy_selected)
         self._delete_button = tool_button(
             Glyph.DELETE, "Delete selected images (Delete), they go to the Recycle Bin", self.delete_selected
+        )
+        self._marker_button = tool_button(
+            Glyph.PEN, "Marker: draw on the image in fullscreen (M)", self.open_marker
         )
         self._fullscreen_button = tool_button(Glyph.FULLSCREEN, "Fullscreen (F11 or double-click)", self.toggle_fullscreen)
         self._open_button = tool_button(
@@ -188,10 +208,12 @@ class MainWindow(QMainWindow):
         )
         bottom_layout.addWidget(self._capture_button)
         bottom_layout.addWidget(self._unlock_button)
+        bottom_layout.addWidget(self._receive_button)
         bottom_layout.addSpacing(8)
         bottom_layout.addWidget(self._info_label, 1)
         bottom_layout.addWidget(self._copy_button)
         bottom_layout.addWidget(self._delete_button)
+        bottom_layout.addWidget(self._marker_button)
         bottom_layout.addWidget(self._fullscreen_button)
         bottom_layout.addWidget(separator())
         bottom_layout.addWidget(self._open_button)
@@ -211,6 +233,7 @@ class MainWindow(QMainWindow):
             (("Ctrl+O",), self.open_folder),
             (("Ctrl+L",), self.change_folder),
             (("Ctrl+U",), self.unlock_selected),
+            (("M",), self.open_marker),
             (("Ctrl+A",), self._gallery.selectAll),
             (("Left", "Up"), lambda: self._step(-1)),
             (("Right", "Down"), lambda: self._step(1)),
@@ -223,9 +246,7 @@ class MainWindow(QMainWindow):
                 shortcut.activated.connect(handler)
 
     def _start_adb(self, preferred: str | None = None) -> None:
-        if self._monitor is not None:
-            self._monitor.stop()
-            self._monitor = None
+        self._stop_workers()
         path = find_adb(preferred or self._settings.get("adb_path"))
         self._adb = Adb(path) if path else None
         self._adb_error = None
@@ -236,7 +257,52 @@ class MainWindow(QMainWindow):
             self._monitor.devices_changed.connect(self._on_devices)
             self._monitor.failed.connect(self._on_adb_failed)
             self._monitor.start()
+            self._receiver = PhoneScreenshotWatcher(self._adb, self._gallery.thumb_bound(), parent=self)
+            self._receiver.received.connect(self._on_received)
+            self._receiver.failed.connect(self._on_receive_failed)
+            self._receiver.start()
         self._update_status()
+        self._sync_receiver()
+
+    def _stop_workers(self) -> None:
+        if self._monitor is not None:
+            self._monitor.stop()
+            self._monitor = None
+        if self._receiver is not None:
+            self._receiver.stop()
+            self._receiver = None
+
+    def _sync_receiver(self) -> None:
+        if self._receiver is None:
+            return
+        enabled = self._receive_button.isChecked() and self._settings.save_dir is not None
+        targets = {device.serial: device.name for device in self._device_bar.selected()} if enabled else {}
+        self._receiver.configure(targets, self._settings.save_dir)
+
+    def _toggle_auto_receive(self, checked: bool = False) -> None:
+        checked = self._receive_button.isChecked()
+        if checked:
+            self._ensure_folder()
+        self._settings.set("auto_receive", checked)
+        self._sync_receiver()
+        if checked:
+            self._notify("Auto-receive on  ·  take a screenshot on the phone and it shows up here", "ok", 3000)
+        else:
+            self._notify("Auto-receive off")
+
+    def _on_received(self, serial: str, path: str, image, thumb) -> None:
+        device = self._device(serial)
+        name = device.name if device is not None else serial
+        self._loader.remember(path, QPixmap.fromImage(image))
+        busy_drawing = self._fullscreen is not None and self._fullscreen.marker_active()
+        self._gallery.add_batch([(path, QPixmap.fromImage(thumb))], select=not busy_drawing)
+        if not busy_drawing:
+            self._show_paths([path], flash=True)
+        self._notify(f"From {name}  ·  {os.path.basename(path)}", "ok")
+
+    def _on_receive_failed(self, serial: str, message: str) -> None:
+        device = self._device(serial)
+        self._notify(f"Auto-receive failed  ·  {device.name if device is not None else serial}: {message}", "error", 4000)
 
     def _pick_adb(self) -> None:
         chosen, _filter = QFileDialog.getOpenFileName(
@@ -252,6 +318,7 @@ class MainWindow(QMainWindow):
         self._devices = devices
         self._device_bar.set_devices(devices)
         self._update_status()
+        self._sync_receiver()
         if arrived and not self._first_scan:
             self._notify("Connected  ·  " + ", ".join(device.name for device in arrived), "ok")
         self._first_scan = False
@@ -266,6 +333,7 @@ class MainWindow(QMainWindow):
     def _on_device_selection(self) -> None:
         self._settings.deselected_devices = self._device_bar.deselected()
         self._update_status()
+        self._sync_receiver()
 
     def _on_blocked_device(self, device: Device) -> None:
         if device.state == "unauthorized":
@@ -330,8 +398,10 @@ class MainWindow(QMainWindow):
             return
         folder = self._ensure_folder()
         stamp = datetime.now().strftime(TIMESTAMP_FORMAT)
-        reserved: set[Path] = set()
-        targets = {device.serial: self._unique_target(folder, stamp, device, reserved) for device in devices}
+        targets = {
+            device.serial: reserve_path(folder, f"Screenshot_{stamp}_{safe_name(device.name)}", ".png")
+            for device in devices
+        }
         self._batch_counter += 1
         self._batch = CaptureBatch(self._batch_counter, devices, targets)
         self._update_status()
@@ -349,16 +419,6 @@ class MainWindow(QMainWindow):
                 )
             )
 
-    @staticmethod
-    def _unique_target(folder: Path, stamp: str, device: Device, reserved: set[Path]) -> Path:
-        base = f"Screenshot_{stamp}_{safe_name(device.name)}"
-        candidate = folder / f"{base}.png"
-        counter = 2
-        while candidate in reserved or candidate.exists():
-            candidate = folder / f"{base}_{counter}.png"
-            counter += 1
-        reserved.add(candidate)
-        return candidate
 
     def _show_capture_progress(self) -> None:
         batch = self._batch
@@ -413,7 +473,7 @@ class MainWindow(QMainWindow):
             labels = [self._label_for(path) for path in shown]
             self._displayed_paths = shown
             for view in self._views():
-                view.set_images(pixmaps, labels)
+                view.set_images(pixmaps, labels, shown)
                 if flash:
                     view.flash()
         self._update_info()
@@ -457,6 +517,8 @@ class MainWindow(QMainWindow):
                 pass
             position, _count = self._gallery.position()
             parts.append(f"{position}/{count}")
+            if self._annotations.has(path):
+                parts.append("marked, not saved")
             text = "   ·   ".join(parts)
         else:
             total = 0
@@ -625,6 +687,7 @@ class MainWindow(QMainWindow):
         deleted = [path for path in paths if move_to_trash(path)]
         for path in deleted:
             self._loader.forget(path)
+            self._annotations.forget(path)
         self._gallery.remove_paths(deleted)
         if len(deleted) < len(paths):
             self._notify(f"Not deleted: {len(paths) - len(deleted)}", "error")
@@ -641,23 +704,83 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         pixmaps = []
+        marked = False
         for path in paths[:MAX_SIDE_BY_SIDE]:
-            pixmap = self._loader.cached(path)
+            pixmap = self._full_pixmap(path)
             if pixmap is None:
-                image = QImageReader(path).read()
-                if image.isNull():
-                    continue
-                pixmap = QPixmap.fromImage(image)
+                continue
+            if self._annotations.has(path):
+                pixmap = QPixmap.fromImage(render_annotated(pixmap, self._annotations.strokes(path)))
+                marked = True
             pixmaps.append(pixmap)
         if not pixmaps:
             self._notify("The image can't be opened", "error")
             return
         image = pixmaps[0].toImage() if len(pixmaps) == 1 else side_by_side(pixmaps)
+        if marked:
+            QGuiApplication.clipboard().setImage(image)
+            self._notify("Copied with your marks", "ok")
+            return
         QGuiApplication.clipboard().setMimeData(file_mime(paths, image))
         if len(paths) == 1:
             self._notify("Copied  ·  paste it as an image or as a file", "ok")
         else:
             self._notify(f"Copied {len(paths)} {images_word(len(paths))}  ·  paste as files or as one image", "ok")
+
+    def _full_pixmap(self, path: str) -> QPixmap | None:
+        pixmap = self._loader.cached(path)
+        if pixmap is not None:
+            return pixmap
+        image = QImageReader(path).read()
+        if image.isNull():
+            return None
+        pixmap = QPixmap.fromImage(image)
+        self._loader.remember(path, pixmap)
+        return pixmap
+
+    def open_marker(self) -> None:
+        if self._fullscreen is None:
+            self.toggle_fullscreen(marker=True)
+        elif not self._fullscreen.marker_active():
+            self._fullscreen.toggle_marker()
+
+    def save_marks(self) -> None:
+        if len(self._displayed_paths) != 1:
+            self._notify("Select a single image to save its marks", "error")
+            return
+        source = self._displayed_paths[0]
+        if not self._annotations.has(source):
+            self._notify("Nothing to save yet  ·  draw on the image first", "error")
+            return
+        pixmap = self._full_pixmap(source)
+        if pixmap is None:
+            self._notify("The image can't be opened", "error")
+            return
+        image = render_annotated(pixmap, self._annotations.strokes(source))
+        original = Path(source)
+        target = reserve_path(original.parent, f"{original.stem}_marked", ".png")
+        try:
+            saved = image.save(str(target), "PNG")
+        finally:
+            release_path(target)
+        if not saved:
+            self._notify("Saving failed", "error")
+            return
+        self._annotations.forget(source)
+        self._loader.remember(str(target), QPixmap.fromImage(image))
+        thumb = image.scaled(
+            self._gallery.thumb_bound(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        if self._gallery.folder is not None and Path(self._gallery.folder) == original.parent:
+            self._gallery.add_batch([(str(target), QPixmap.fromImage(thumb))])
+        self._show_paths([str(target)], flash=True)
+        if self._fullscreen is not None:
+            self._fullscreen.refresh()
+        self._notify(f"Saved  ·  {target.name}", "ok")
+
+    def _on_annotation_changed(self, _key: str) -> None:
+        self._viewer.update()
+        self._update_info()
 
     def _folder(self) -> Path:
         return self._settings.save_dir or default_folder()
@@ -708,14 +831,14 @@ class MainWindow(QMainWindow):
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
-    def toggle_fullscreen(self) -> None:
+    def toggle_fullscreen(self, marker: bool = False) -> None:
         if self._fullscreen is not None:
             self._fullscreen.close_animated()
             return
-        viewer = FullscreenViewer(self)
+        viewer = FullscreenViewer(self._brush, self._annotations, self)
         viewer.setWindowIcon(self.windowIcon())
         viewer.view.set_placeholder(*self._placeholder_text())
-        viewer.view.set_images(self._viewer.pixmaps(), self._viewer.labels(), animate=False)
+        viewer.view.set_images(self._viewer.pixmaps(), self._viewer.labels(), self._viewer.keys(), animate=False)
         viewer.closed.connect(self._on_fullscreen_closed)
         viewer.navigate.connect(self._step)
         viewer.view.context_requested.connect(self._on_view_context)
@@ -723,9 +846,12 @@ class MainWindow(QMainWindow):
         viewer.capture_requested.connect(self.capture)
         viewer.delete_requested.connect(self.delete_selected)
         viewer.copy_requested.connect(self.copy_selected)
+        viewer.save_marks_requested.connect(self.save_marks)
+        viewer.annotation_changed.connect(self._on_annotation_changed)
+        viewer.brush_changed.connect(lambda data: self._settings.set("marker", data))
         self._fullscreen = viewer
         self._sync_fullscreen_counter()
-        viewer.open_on(self.screen())
+        viewer.open_on(self.screen(), marker=bool(marker))
 
     def _on_fullscreen_closed(self) -> None:
         self._fullscreen = None
@@ -766,6 +892,5 @@ class MainWindow(QMainWindow):
         self._settings.set("geometry", bytes(self.saveGeometry().toBase64()).decode("ascii"))
         if self._fullscreen is not None:
             self._fullscreen.close()
-        if self._monitor is not None:
-            self._monitor.stop()
+        self._stop_workers()
         super().closeEvent(event)

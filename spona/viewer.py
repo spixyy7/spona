@@ -1,9 +1,22 @@
+import math
+
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from .annotations import (
+    MARKER_COLORS,
+    AnnotationStore,
+    Brush,
+    Stroke,
+    paint_stroke,
+    paint_strokes,
+    smooth_path,
+    stroke_hit,
+)
 from .icons import Glyph, glyph_pixmap
 from .images import rounded
+from .marker import MarkerPanel
 from .theme import BACKGROUND, MUTED
 from .widgets import Toast, separator, tool_button
 
@@ -15,23 +28,34 @@ class ImageView(QWidget):
     navigate = Signal(int)
     context_requested = Signal(int, object)
     drag_requested = Signal(int)
+    annotation_changed = Signal(str)
+    brush_resize_requested = Signal(int)
+    draw_blocked = Signal()
 
     def __init__(self, parent=None, framed: bool = True, background: str = BACKGROUND):
         super().__init__(parent)
+        self.store: AnnotationStore | None = None
         self._framed = framed
         self._margin = 18 if framed else 0
         self._gap = 16 if framed else 10
         self._background = QColor(background)
         self._current: list[QPixmap] = []
         self._current_labels: list[str] = []
+        self._current_keys: list[str] = []
         self._previous: list[QPixmap] = []
         self._previous_labels: list[str] = []
+        self._previous_keys: list[str] = []
         self._progress = 1.0
         self._flash = 0.0
         self._scaled_cache: dict[int, tuple[tuple[int, int], QPixmap]] = {}
         self._wheel_accumulator = 0
         self._press_position = QPointF()
         self._press_index = -1
+        self._brush: Brush | None = None
+        self._hover: QPointF | None = None
+        self._live_points: list[QPointF] | None = None
+        self._live_width = 1.0
+        self._erase_before: list[Stroke] | None = None
         self._title = ""
         self._detail = ""
         self._placeholder_icon = glyph_pixmap(Glyph.PHONE, "#3b3f46", 54)
@@ -63,6 +87,9 @@ class ImageView(QWidget):
     def labels(self) -> list[str]:
         return list(self._current_labels)
 
+    def keys(self) -> list[str]:
+        return list(self._current_keys)
+
     def set_placeholder(self, title: str, detail: str) -> None:
         if (title, detail) == (self._title, self._detail):
             return
@@ -70,19 +97,33 @@ class ImageView(QWidget):
         if not self._current:
             self.update()
 
-    def set_images(self, pixmaps: list[QPixmap], labels: list[str] | None = None, animate: bool = True) -> None:
+    def set_images(
+        self,
+        pixmaps: list[QPixmap],
+        labels: list[str] | None = None,
+        keys: list[str] | None = None,
+        animate: bool = True,
+    ) -> None:
         labels = list(labels) if labels is not None else [""] * len(pixmaps)
-        if [pixmap.cacheKey() for pixmap in pixmaps] == [pixmap.cacheKey() for pixmap in self._current]:
+        keys = list(keys) if keys is not None else [""] * len(pixmaps)
+        same_images = [pixmap.cacheKey() for pixmap in pixmaps] == [pixmap.cacheKey() for pixmap in self._current]
+        if same_images and keys == self._current_keys:
             if labels != self._current_labels:
                 self._current_labels = labels
                 self.update()
             return
         self._fade.stop()
+        self._live_points = None
+        self._erase_before = None
         if animate:
-            self._previous, self._previous_labels = self._current, self._current_labels
+            self._previous, self._previous_labels, self._previous_keys = (
+                self._current,
+                self._current_labels,
+                self._current_keys,
+            )
         else:
-            self._previous, self._previous_labels = [], []
-        self._current, self._current_labels = list(pixmaps), labels
+            self._previous, self._previous_labels, self._previous_keys = [], [], []
+        self._current, self._current_labels, self._current_keys = list(pixmaps), labels, keys
         self._prune_cache()
         self._progress = 0.0 if animate else 1.0
         if animate:
@@ -93,13 +134,45 @@ class ImageView(QWidget):
         self._flash_animation.stop()
         self._flash_animation.start()
 
+    def set_brush(self, brush: Brush | None) -> None:
+        self._brush = brush
+        self._live_points = None
+        self._erase_before = None
+        if brush is None:
+            self._hover = None
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        self.update()
+
+    def drawing(self) -> bool:
+        return self._brush is not None
+
+    def current_key(self) -> str | None:
+        target = self._draw_target()
+        return target[0] if target is not None else None
+
+    def _draw_target(self):
+        if self.store is None or len(self._current) != 1 or not self._current_keys or not self._current_keys[0]:
+            return None
+        rects = self._layout(self._current, False)
+        if not rects:
+            return None
+        pixmap = self._current[0]
+        rect = rects[0]
+        return self._current_keys[0], pixmap, rect, rect.width() / max(1, pixmap.width())
+
+    @staticmethod
+    def _to_image(position: QPointF, rect: QRectF, scale: float) -> QPointF:
+        return QPointF((position.x() - rect.left()) / scale, (position.y() - rect.top()) / scale)
+
     def _on_fade(self, value) -> None:
         self._progress = float(value)
         self.update()
 
     def _on_fade_finished(self) -> None:
         self._progress = 1.0
-        self._previous, self._previous_labels = [], []
+        self._previous, self._previous_labels, self._previous_keys = [], [], []
         self._prune_cache()
         self.update()
 
@@ -123,17 +196,29 @@ class ImageView(QWidget):
         return -1
 
     def mouseDoubleClickEvent(self, event):
+        if self._brush is not None:
+            self.mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_index = -1
             self.double_clicked.emit()
 
     def mousePressEvent(self, event):
+        if self._brush is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._begin_draw(event.position())
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_position = event.position()
             self._press_index = self.index_at(event.position())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._brush is not None:
+            self._hover = event.position()
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._continue_draw(event.position())
+            self.update()
+            return
         if self._press_index >= 0 and event.buttons() & Qt.MouseButton.LeftButton:
             distance = (event.position() - self._press_position).manhattanLength()
             if distance >= QApplication.startDragDistance():
@@ -143,8 +228,67 @@ class ImageView(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._brush is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._finish_draw()
+            return
         self._press_index = -1
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = None
+        if self._brush is not None:
+            self.update()
+        super().leaveEvent(event)
+
+    def _begin_draw(self, position: QPointF) -> None:
+        target = self._draw_target()
+        if target is None:
+            self.draw_blocked.emit()
+            return
+        key, _pixmap, rect, scale = target
+        point = self._to_image(position, rect, scale)
+        if self._brush.tool == "eraser":
+            self._erase_before = list(self.store.strokes(key))
+            self._erase(key, point, self._brush.size / 2 / scale)
+        else:
+            self._live_points = [point]
+            self._live_width = max(0.5, self._brush.size / scale)
+        self.update()
+
+    def _continue_draw(self, position: QPointF) -> None:
+        target = self._draw_target()
+        if target is None:
+            return
+        key, _pixmap, rect, scale = target
+        point = self._to_image(position, rect, scale)
+        if self._live_points is not None:
+            last = self._live_points[-1]
+            if math.hypot(point.x() - last.x(), point.y() - last.y()) * scale >= 1.2:
+                self._live_points.append(point)
+        elif self._erase_before is not None:
+            self._erase(key, point, self._brush.size / 2 / scale)
+
+    def _finish_draw(self) -> None:
+        target = self._draw_target()
+        if target is not None:
+            key = target[0]
+            if self._live_points:
+                stroke = Stroke(self._live_points, self._brush.color, self._live_width, self._brush.opacity / 100)
+                self.store.add(key, stroke)
+                self.annotation_changed.emit(key)
+            elif self._erase_before is not None and len(self._erase_before) != len(self.store.strokes(key)):
+                self.store.commit(key, self.store.strokes(key), previous=self._erase_before)
+                self.annotation_changed.emit(key)
+        self._live_points = None
+        self._erase_before = None
+        self.update()
+
+    def _erase(self, key: str, point: QPointF, radius: float) -> None:
+        strokes = self.store.strokes(key)
+        remaining = [stroke for stroke in strokes if not stroke_hit(stroke, point, radius)]
+        if len(remaining) != len(strokes):
+            self.store.set_silently(key, remaining)
+            self.annotation_changed.emit(key)
 
     def contextMenuEvent(self, event):
         index = self.index_at(QPointF(event.pos()))
@@ -156,7 +300,10 @@ class ImageView(QWidget):
         while abs(self._wheel_accumulator) >= 120:
             step = -1 if self._wheel_accumulator > 0 else 1
             self._wheel_accumulator += 120 * step
-            self.navigate.emit(step)
+            if self._brush is not None and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.brush_resize_requested.emit(-step)
+            else:
+                self.navigate.emit(step)
         event.accept()
 
     def _layout(self, pixmaps: list[QPixmap], labelled: bool) -> list[QRectF]:
@@ -215,16 +362,23 @@ class ImageView(QWidget):
             | QPainter.RenderHint.TextAntialiasing
         )
         if self._previous and self._progress < 1.0:
-            self._paint_group(painter, self._previous, self._previous_labels, 1.0 - self._progress, 1.0, False)
+            self._paint_group(
+                painter, self._previous, self._previous_labels, self._previous_keys, 1.0 - self._progress, 1.0, False
+            )
         if self._current:
             scale = 0.97 + 0.03 * self._progress
-            self._paint_group(painter, self._current, self._current_labels, self._progress, scale, True)
+            self._paint_group(
+                painter, self._current, self._current_labels, self._current_keys, self._progress, scale, True
+            )
         else:
             painter.setOpacity(self._progress)
             self._paint_placeholder(painter)
+        if self._brush is not None and self._hover is not None:
+            painter.setOpacity(1.0)
+            self._paint_brush_cursor(painter)
         painter.end()
 
-    def _paint_group(self, painter, pixmaps, labels, opacity, scale, is_current) -> None:
+    def _paint_group(self, painter, pixmaps, labels, keys, opacity, scale, is_current) -> None:
         if opacity <= 0.0:
             return
         labelled = len(pixmaps) > 1 and any(labels)
@@ -250,6 +404,8 @@ class ImageView(QWidget):
                 painter.restore()
             else:
                 painter.drawPixmap(rect.topLeft(), self._scaled(pixmap, rect))
+            key = keys[index] if index < len(keys) else ""
+            self._paint_marks(painter, key, pixmap, rect, path, is_current and index == 0)
             if self._framed:
                 painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -261,6 +417,46 @@ class ImageView(QWidget):
                 painter.setPen(QColor(MUTED))
                 text = painter.fontMetrics().elidedText(labels[index], Qt.TextElideMode.ElideMiddle, int(rect.width()))
                 painter.drawText(QRectF(rect.left(), rect.bottom() + 6, rect.width(), 18), Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
+    def _paint_marks(self, painter, key, pixmap, rect, path, can_be_live) -> None:
+        live = can_be_live and bool(self._live_points)
+        if self.store is None or not key or not (self.store.has(key) or live):
+            return
+        scale = rect.width() / max(1, pixmap.width())
+        painter.save()
+        if self._framed:
+            painter.setClipPath(path)
+        else:
+            painter.setClipRect(rect)
+        painter.translate(rect.left(), rect.top())
+        painter.scale(scale, scale)
+        paint_strokes(painter, self.store.strokes(key))
+        if live:
+            paint_stroke(
+                painter,
+                smooth_path(self._live_points),
+                self._brush.color,
+                self._live_width,
+                self._brush.opacity / 100,
+            )
+        painter.restore()
+
+    def _paint_brush_cursor(self, painter) -> None:
+        center = self._hover
+        radius = max(1.5, self._brush.size / 2)
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 170), 3))
+        painter.drawEllipse(center, radius, radius)
+        if self._brush.tool == "eraser":
+            painter.setPen(QPen(QColor("#ffffff"), 1.4, Qt.PenStyle.DashLine))
+        else:
+            painter.setPen(QPen(QColor(self._brush.color), 1.6))
+        painter.drawEllipse(center, radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(center, 1.2, 1.2)
         painter.restore()
 
     def _paint_placeholder(self, painter) -> None:
@@ -282,26 +478,60 @@ class ImageView(QWidget):
         painter.drawText(QRectF(32, center.y() + 18, self.width() - 64, 60), flags, self._detail)
 
 
+class FadingPanel:
+    def __init__(self, widget: QWidget, owner, duration: int = 200):
+        self.widget = widget
+        self.effect = QGraphicsOpacityEffect(widget)
+        self.effect.setOpacity(1.0)
+        widget.setGraphicsEffect(self.effect)
+        self.animation = QPropertyAnimation(self.effect, b"opacity", owner)
+        self.animation.setDuration(duration)
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.animation.finished.connect(self._after)
+
+    def fade(self, target: float) -> None:
+        if target > 0:
+            self.widget.show()
+            self.widget.raise_()
+        self.animation.stop()
+        self.animation.setStartValue(self.effect.opacity())
+        self.animation.setEndValue(target)
+        self.animation.start()
+
+    def _after(self) -> None:
+        if self.effect.opacity() <= 0.01 and self.animation.endValue() == 0.0:
+            self.widget.hide()
+
+
 class FullscreenViewer(QWidget):
     closed = Signal()
     navigate = Signal(int)
     capture_requested = Signal()
     delete_requested = Signal()
     copy_requested = Signal()
+    save_marks_requested = Signal()
+    brush_changed = Signal(dict)
+    annotation_changed = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, brush: Brush, store: AnnotationStore, parent=None):
         super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("Spona")
+        self._brush = brush
         self.view = ImageView(self, framed=False, background="#050506")
+        self.view.store = store
         self.view.setMouseTracking(True)
         self.view.installEventFilter(self)
         self.view.double_clicked.connect(self.close_animated)
         self.view.navigate.connect(self.navigate)
+        self.view.annotation_changed.connect(self._on_annotation_changed)
+        self.view.brush_resize_requested.connect(lambda steps: self._marker.resize_brush(steps))
+        self.view.draw_blocked.connect(self._on_draw_blocked)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.view)
-        self.toast = Toast(self.view, edge="top")
+        self.toast = Toast(self.view, edge="top", margin=84)
+
         self._overlay = QFrame(self.view)
         self._overlay.setObjectName("overlay")
         bar = QHBoxLayout(self._overlay)
@@ -309,21 +539,31 @@ class FullscreenViewer(QWidget):
         bar.setSpacing(2)
         self._counter = QLabel()
         self._counter.setObjectName("counter")
+        self._marker_button = tool_button(Glyph.PEN, "Marker: draw on the image (M)", self.toggle_marker, text="Marker")
+        self._marker_button.setCheckable(True)
         bar.addWidget(tool_button(Glyph.PREVIOUS, "Previous (←)", lambda: self.navigate.emit(-1), icon_size=16))
         bar.addWidget(self._counter)
         bar.addWidget(tool_button(Glyph.NEXT, "Next (→)", lambda: self.navigate.emit(1), icon_size=16))
         bar.addWidget(separator())
+        bar.addWidget(self._marker_button)
         bar.addWidget(tool_button(Glyph.CAMERA, "Capture (F5 or Space)", self.capture_requested.emit))
         bar.addWidget(tool_button(Glyph.COPY, "Copy (Ctrl+C)", self.copy_requested.emit))
-        bar.addWidget(tool_button(Glyph.DELETE, "Delete (Delete)", self.delete_requested.emit))
+        bar.addWidget(tool_button(Glyph.DELETE, "Delete image (Delete)", self.delete_requested.emit))
         bar.addWidget(separator())
         bar.addWidget(tool_button(Glyph.EXIT_FULLSCREEN, "Exit fullscreen (Esc)", self.close_animated))
-        self._overlay_effect = QGraphicsOpacityEffect(self._overlay)
-        self._overlay_effect.setOpacity(1.0)
-        self._overlay.setGraphicsEffect(self._overlay_effect)
-        self._overlay_animation = QPropertyAnimation(self._overlay_effect, b"opacity", self)
-        self._overlay_animation.setDuration(220)
-        self._overlay_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._overlay_fade = FadingPanel(self._overlay, self, 220)
+
+        self._marker = MarkerPanel(brush, self.view)
+        self._marker.changed.connect(self._on_brush_changed)
+        self._marker.undo_requested.connect(self.undo)
+        self._marker.redo_requested.connect(self.redo)
+        self._marker.clear_requested.connect(self.clear_marks)
+        self._marker.copy_requested.connect(self.copy_requested.emit)
+        self._marker.save_requested.connect(self.save_marks_requested.emit)
+        self._marker.done_requested.connect(self.toggle_marker)
+        self._marker_fade = FadingPanel(self._marker, self, 200)
+        self._marker.hide()
+
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(2400)
@@ -334,15 +574,18 @@ class FullscreenViewer(QWidget):
         self._window_animation.finished.connect(self._after_window_animation)
         self._closing = False
 
+    def marker_active(self) -> bool:
+        return self.view.drawing()
+
     def set_counter(self, position: int, count: int, selected: int) -> None:
         if selected > 1:
             self._counter.setText(f"{selected} selected")
         else:
             self._counter.setText(f"{position} / {count}" if count else "0 / 0")
-        self._overlay.adjustSize()
-        self._place_overlay()
+        self._place_panels()
+        self._refresh_history()
 
-    def open_on(self, screen) -> None:
+    def open_on(self, screen, marker: bool = False) -> None:
         self.setWindowOpacity(0.0)
         if screen is not None:
             self.setGeometry(screen.geometry())
@@ -351,6 +594,64 @@ class FullscreenViewer(QWidget):
         self.activateWindow()
         self._animate_window(1.0)
         self._show_chrome()
+        if marker:
+            self.toggle_marker()
+
+    def toggle_marker(self) -> None:
+        if self.view.drawing():
+            self.view.set_brush(None)
+            self._marker_fade.fade(0.0)
+            self._marker_button.setChecked(False)
+            self._show_chrome()
+            return
+        self.view.set_brush(self._brush)
+        self._marker.sync()
+        self._place_panels()
+        self._marker_fade.fade(1.0)
+        self._marker_button.setChecked(True)
+        self._refresh_history()
+        if self.view.current_key() is None:
+            self._on_draw_blocked()
+
+    def undo(self) -> None:
+        key = self.view.current_key()
+        if key and self.view.store.undo(key):
+            self._on_annotation_changed(key)
+
+    def redo(self) -> None:
+        key = self.view.current_key()
+        if key and self.view.store.redo(key):
+            self._on_annotation_changed(key)
+
+    def clear_marks(self) -> None:
+        key = self.view.current_key()
+        if key and self.view.store.clear(key):
+            self._on_annotation_changed(key)
+            self.toast.show_message("Marks cleared  ·  Ctrl+Z brings them back")
+
+    def refresh(self) -> None:
+        self.view.update()
+        self._refresh_history()
+
+    def _on_annotation_changed(self, key: str) -> None:
+        self.view.update()
+        self._refresh_history()
+        self.annotation_changed.emit(key)
+
+    def _refresh_history(self) -> None:
+        key = self.view.current_key()
+        store = self.view.store
+        if key is None or store is None:
+            self._marker.set_history(False, False, False)
+            return
+        self._marker.set_history(store.can_undo(key), store.can_redo(key), store.has(key))
+
+    def _on_brush_changed(self) -> None:
+        self.view.update()
+        self.brush_changed.emit(self._brush.to_dict())
+
+    def _on_draw_blocked(self) -> None:
+        self.toast.show_message("Select a single image to draw on it", "error")
 
     def close_animated(self) -> None:
         if self._closing:
@@ -369,39 +670,64 @@ class FullscreenViewer(QWidget):
             self.close()
 
     def _show_chrome(self) -> None:
-        self.view.unsetCursor()
-        if self._overlay_effect.opacity() < 1.0:
-            self._overlay_animation.stop()
-            self._overlay_animation.setStartValue(self._overlay_effect.opacity())
-            self._overlay_animation.setEndValue(1.0)
-            self._overlay_animation.start()
+        if not self.view.drawing():
+            self.view.unsetCursor()
+        if self._overlay_fade.effect.opacity() < 1.0 or not self._overlay.isVisible():
+            self._overlay_fade.fade(1.0)
         self._idle.start()
 
     def _hide_chrome(self) -> None:
-        if self._overlay.underMouse():
+        if self._overlay.underMouse() or self._marker.underMouse():
             self._idle.start()
             return
-        self._overlay_animation.stop()
-        self._overlay_animation.setStartValue(self._overlay_effect.opacity())
-        self._overlay_animation.setEndValue(0.0)
-        self._overlay_animation.start()
-        self.view.setCursor(Qt.CursorShape.BlankCursor)
+        self._overlay_fade.fade(0.0)
+        if not self.view.drawing():
+            self.view.setCursor(Qt.CursorShape.BlankCursor)
 
-    def _place_overlay(self) -> None:
+    def _place_panels(self) -> None:
         self._overlay.adjustSize()
         self._overlay.move((self.view.width() - self._overlay.width()) // 2, self.view.height() - self._overlay.height() - 28)
+        self._marker.adjustSize()
+        self._marker.move((self.view.width() - self._marker.width()) // 2, 24)
 
     def eventFilter(self, watched, event):
         if watched is self.view:
             if event.type() == QEvent.Type.MouseMove:
                 self._show_chrome()
             elif event.type() == QEvent.Type.Resize:
-                self._place_overlay()
+                self._place_panels()
         return False
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key in (Qt.Key.Key_Escape, Qt.Key.Key_F11, Qt.Key.Key_F, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        control = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        drawing = self.view.drawing()
+        if key == Qt.Key.Key_M and not control:
+            self.toggle_marker()
+        elif drawing and key == Qt.Key.Key_Escape:
+            self.toggle_marker()
+        elif drawing and control and key == Qt.Key.Key_Z and shift:
+            self.redo()
+        elif drawing and control and key == Qt.Key.Key_Z:
+            self.undo()
+        elif drawing and control and key == Qt.Key.Key_Y:
+            self.redo()
+        elif drawing and control and key == Qt.Key.Key_S:
+            self.save_marks_requested.emit()
+        elif drawing and key == Qt.Key.Key_Delete:
+            self.clear_marks()
+        elif drawing and key == Qt.Key.Key_P:
+            self._marker.set_tool("pen")
+        elif drawing and key == Qt.Key.Key_E:
+            self._marker.set_tool("eraser")
+        elif drawing and key == Qt.Key.Key_BracketLeft:
+            self._marker.resize_brush(-1)
+        elif drawing and key == Qt.Key.Key_BracketRight:
+            self._marker.resize_brush(1)
+        elif drawing and int(Qt.Key.Key_1) <= key <= int(Qt.Key.Key_6):
+            self._marker.set_color(MARKER_COLORS[key - int(Qt.Key.Key_1)])
+        elif key in (Qt.Key.Key_Escape, Qt.Key.Key_F11, Qt.Key.Key_F, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.close_animated()
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp):
             self.navigate.emit(-1)

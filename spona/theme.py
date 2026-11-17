@@ -27,6 +27,8 @@ QToolButton {{ background: transparent; border: none; border-radius: 8px; paddin
 QToolButton:hover {{ background: {SURFACE_HIGH}; }}
 QToolButton:pressed {{ background: #2c2f35; }}
 QToolButton:disabled {{ color: #55585f; }}
+QToolButton:checked {{ background: {ACCENT_TINT}; color: {ACCENT}; }}
+QToolButton:checked:hover {{ background: #20332a; }}
 QToolButton#path {{ color: {MUTED}; padding: 5px 8px; }}
 QToolButton#path:hover {{ color: {TEXT}; }}
 QToolButton#chip {{ background: {BACKGROUND}; border: 1px solid {BORDER}; border-radius: 14px; padding: 4px 12px 4px 8px; color: {MUTED}; }}
@@ -63,6 +65,11 @@ QDialog QPushButton:hover {{ border-color: #3a3d44; }}
 QDialog QPushButton#primary {{ background: {ACCENT}; border: none; color: {ACCENT_DARK}; font-weight: 600; }}
 QDialog QPushButton#primary:hover {{ background: #5be69c; }}
 QLabel#counter {{ color: {MUTED}; padding: 0 6px; }}
+QSlider {{ background: transparent; min-height: 22px; }}
+QSlider::groove:horizontal {{ height: 4px; background: #34373d; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: #e3e5e8; }}
+QSlider::handle:horizontal:hover {{ background: #ffffff; }}
 """
 
 

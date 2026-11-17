@@ -162,13 +162,18 @@ class Gallery(QListWidget):
         self.selection_changed.emit(self.selected_paths())
         self.contents_changed.emit()
 
-    def add_batch(self, entries: list[tuple[str, QPixmap | None]]) -> None:
+    def add_batch(self, entries: list[tuple[str, QPixmap | None]], select: bool = True) -> None:
         self.blockSignals(True)
         for path, thumb in reversed(entries):
             if thumb is not None:
                 self._store_thumb(path, thumb)
             if path not in self._items:
                 self.insertItem(0, self._create_item(path))
+        if not select:
+            self.blockSignals(False)
+            self._watch()
+            self.contents_changed.emit()
+            return
         self.clearSelection()
         first = None
         for path, _thumb in entries:

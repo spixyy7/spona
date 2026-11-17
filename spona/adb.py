@@ -23,6 +23,13 @@ MARKET_NAME_PROPERTIES = (
     "ro.vendor.oplus.market.name",
 )
 PROPERTY_LINE = re.compile(r"^\[(?P<key>[^\]]+)\]:\s*\[(?P<value>.*)\]\s*$")
+PHONE_SCREENSHOT_FOLDERS = ("/sdcard/Pictures/Screenshots", "/sdcard/DCIM/Screenshots", "/sdcard/Screenshots")
+RECENT_SCREENSHOTS_COMMAND = (
+    "for d in " + " ".join(PHONE_SCREENSHOT_FOLDERS) + "; do "
+    '[ -d "$d" ] && ls -t "$d" 2>/dev/null | head -n 10 | while read -r f; do '
+    'stat -c "%s|%Y|%n" "$d/$f" 2>/dev/null; done; '
+    "done; true"
+)
 SCREEN_STATE_COMMAND = (
     'dumpsys power 2>/dev/null | grep -m1 "mWakefulness="; '
     'dumpsys window 2>/dev/null | grep -m1 "isKeyguardShowing="; '
@@ -188,6 +195,19 @@ class Adb:
         if start < 0:
             raise AdbError("the phone did not return a screenshot")
         return data[start:]
+
+    def recent_screenshots(self, serial: str) -> list[tuple[str, int, int]]:
+        output = self._run(["shell", RECENT_SCREENSHOTS_COMMAND], serial=serial, timeout=10)
+        entries = []
+        for line in output.decode("utf-8", "replace").splitlines():
+            parts = line.strip().split("|", 2)
+            if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                continue
+            entries.append((parts[2], int(parts[0]), int(parts[1])))
+        return entries
+
+    def read_file(self, serial: str, path: str) -> bytes:
+        return self._run(["exec-out", "cat " + shlex.quote(path)], serial=serial, timeout=30)
 
     def screen_state(self, serial: str) -> ScreenState:
         output = self._run(["shell", SCREEN_STATE_COMMAND], serial=serial, timeout=8).decode("utf-8", "replace")

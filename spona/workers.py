@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QImage
 
 from .adb import Adb, AdbError, Device
+from .naming import release_path, reserve_path
 
 
 class DeviceMonitor(QThread):
@@ -122,23 +123,114 @@ class CaptureTask(QRunnable):
 
     def run(self):
         try:
-            data = self._grab()
-            image = QImage.fromData(data)
-            if image.isNull():
-                raise AdbError("the phone returned an invalid image")
-            self._target.parent.mkdir(parents=True, exist_ok=True)
-            partial = self._target.with_name(self._target.name + ".part")
-            partial.write_bytes(data)
-            os.replace(partial, self._target)
-            thumbnail = image.scaled(
-                self._thumb_bound,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+            image, thumbnail = save_image(self._grab(), self._target, self._thumb_bound)
         except (AdbError, OSError) as error:
             self._signals.failed.emit(self._batch, self._serial, str(error))
             return
+        finally:
+            release_path(self._target)
         self._signals.captured.emit(self._batch, self._serial, str(self._target), image, thumbnail)
+
+
+def save_image(data: bytes, target: Path, thumb_bound: QSize) -> tuple[QImage, QImage]:
+    image = QImage.fromData(data)
+    if image.isNull():
+        raise AdbError("the phone returned an invalid image")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + ".part")
+    partial.write_bytes(data)
+    os.replace(partial, target)
+    thumbnail = image.scaled(thumb_bound, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return image, thumbnail
+
+
+class PhoneScreenshotWatcher(QThread):
+    received = Signal(str, str, QImage, QImage)
+    failed = Signal(str, str)
+
+    IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+    def __init__(self, adb: Adb, thumb_bound: QSize, interval: float = 1.0, parent=None):
+        super().__init__(parent)
+        self._adb = adb
+        self._thumb_bound = thumb_bound
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._targets: dict[str, str] = {}
+        self._folder: Path | None = None
+        self._stopping = threading.Event()
+        self._wakeup = threading.Event()
+        self._since: dict[str, int] = {}
+        self._seen: dict[str, set[str]] = {}
+        self._pending: dict[str, dict[str, int]] = {}
+
+    def configure(self, targets: dict[str, str], folder: Path | None) -> None:
+        with self._lock:
+            self._targets = dict(targets)
+            self._folder = folder
+        self._wakeup.set()
+
+    def run(self):
+        while not self._stopping.is_set():
+            with self._lock:
+                targets = dict(self._targets)
+                folder = self._folder
+            for serial in [serial for serial in self._since if serial not in targets]:
+                self._since.pop(serial, None)
+                self._seen.pop(serial, None)
+                self._pending.pop(serial, None)
+            for serial in targets:
+                if self._stopping.is_set():
+                    break
+                try:
+                    self._poll(serial, folder)
+                except AdbError:
+                    continue
+            self._wakeup.wait(self._interval)
+            self._wakeup.clear()
+
+    def _poll(self, serial: str, folder: Path | None) -> None:
+        entries = [
+            entry for entry in self._adb.recent_screenshots(serial)
+            if entry[0].lower().endswith(self.IMAGE_SUFFIXES)
+        ]
+        if serial not in self._since:
+            self._since[serial] = max((modified for _path, _size, modified in entries), default=0)
+            self._seen[serial] = {path for path, _size, _modified in entries}
+            self._pending[serial] = {}
+            return
+        since = self._since[serial]
+        seen = self._seen[serial]
+        pending = self._pending[serial]
+        for path, size, modified in sorted(entries, key=lambda entry: entry[2]):
+            if path in seen or modified < since:
+                continue
+            if size > 0 and pending.get(path) == size:
+                seen.add(path)
+                pending.pop(path, None)
+                self._receive(serial, path, folder)
+            else:
+                pending[path] = size
+
+    def _receive(self, serial: str, remote_path: str, folder: Path | None) -> None:
+        if folder is None:
+            return
+        name = remote_path.rsplit("/", 1)[-1]
+        stem, dot, suffix = name.rpartition(".")
+        target = reserve_path(folder, stem or name, f".{suffix}" if dot else ".png")
+        try:
+            image, thumbnail = save_image(self._adb.read_file(serial, remote_path), target, self._thumb_bound)
+        except (AdbError, OSError) as error:
+            self.failed.emit(serial, str(error))
+            return
+        finally:
+            release_path(target)
+        self.received.emit(serial, str(target), image, thumbnail)
+
+    def stop(self):
+        self._stopping.set()
+        self._wakeup.set()
+        self.wait(4000)
 
 
 class ScreenSignals(QObject):
