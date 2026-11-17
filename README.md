@@ -33,6 +33,15 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 - Live status for each phone: connected, waiting for approval, offline, locked, screen off
 - Unlock over adb: Spona wakes the screen, opens the PIN pad and types your PIN or password. You can let it remember the PIN; it is stored encrypted with Windows DPAPI
 - Right-click a phone to capture only that one, unlock it, lock it, or forget its saved PIN
+- **Tailscale:** use your phones without a cable, from anywhere on your tailnet. Everything above works the same way over the network
+
+**Tailscale setup** (needs [Tailscale](https://tailscale.com) on the PC and on the phone)
+1. Plug the phone in with USB once
+2. Click **+** next to the phones, or open **Settings → Tailscale → Connect a phone…**
+3. Click **Go wireless**. Spona switches adb to network mode, finds the phone on your tailnet and checks it is the same phone
+4. Unplug the cable. The phone shows up as *Phone · Tailscale* and Spona reconnects it by itself whenever it is reachable
+
+You can also connect a phone that is already listening by typing its Tailscale address. Network adb mode is reset when the phone restarts, so plug it in and press **Go wireless** again after a reboot. Turn it off or forget phones any time in **Settings**.
 
 **Gallery**
 - Thumbnail strip of everything in the save folder, kept in sync with the disk
@@ -115,6 +124,7 @@ Spona is a thin layer over standard `adb` commands:
 | Unlock | `wm dismiss-keyguard`, then `input text` with the PIN |
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
 | Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
+| Tailscale | `adb tcpip 5555` once over USB, then `adb connect <tailscale-ip>:5555`; peers come from `tailscale status --json` |
 
 > [!NOTE]
 > Only PIN and password locks can be entered over adb. Pattern, fingerprint and face unlock are not supported.
@@ -128,9 +138,10 @@ Spona never writes inside its own folder. Everything it stores is local:
 | Settings | `%APPDATA%\Spona\settings.json` |
 | Saved PINs (optional, encrypted with Windows DPAPI for your user) | `%APPDATA%\Spona\vault.json` |
 | Which received shots came from which phone (for PC + phone delete) | `%APPDATA%\Spona\origins.json` |
+| Saved Tailscale phones | `%APPDATA%\Spona\settings.json` |
 | Screenshots | `Pictures\Spona`, or the folder you pick |
 
-Nothing is sent over the network.
+Spona itself sends nothing anywhere. With Tailscale, adb talks to your phone over your own tailnet.
 
 ## Project layout
 
@@ -138,8 +149,9 @@ Nothing is sent over the network.
 spona/
 ├── app.py           entry point and single-instance handling
 ├── main_window.py   main window and app logic
-├── adb.py           adb wrapper: devices, screenshots, screen state, unlock
-├── workers.py       background threads: device monitor, capture, unlock, auto-receive
+├── adb.py           adb wrapper: devices, screenshots, screen state, unlock, network mode
+├── tailscale.py     lists phones on your tailnet
+├── workers.py       background threads: device monitor, capture, unlock, auto-receive, reconnect
 ├── devices.py       phone chips in the top bar
 ├── viewer.py        image view and fullscreen viewer
 ├── marker.py        marker toolbar

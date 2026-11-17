@@ -38,8 +38,28 @@ SCREEN_STATE_COMMAND = (
 )
 
 
+DEFAULT_TCP_PORT = 5555
+
+
 class AdbError(Exception):
     pass
+
+
+def is_tailscale_ip(ip: str) -> bool:
+    parts = ip.split(".")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts):
+        return False
+    return parts[0] == "100" and 64 <= int(parts[1]) <= 127
+
+
+def normalize_address(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+    host, separator, port = text.rpartition(":")
+    if separator and port.isdigit() and host:
+        return text
+    return f"{text}:{DEFAULT_TCP_PORT}"
 
 
 class UnlockOutcome(Enum):
@@ -66,10 +86,25 @@ class Device:
     android: str = ""
     screen_on: bool | None = None
     locked: bool | None = None
+    hardware_serial: str = ""
 
     @property
     def ready(self) -> bool:
         return self.state == "device"
+
+    @property
+    def network(self) -> bool:
+        return ":" in self.serial
+
+    @property
+    def transport(self) -> str:
+        if not self.network:
+            return "USB"
+        return "Tailscale" if is_tailscale_ip(self.serial.rsplit(":", 1)[0]) else "Wi-Fi"
+
+    @property
+    def identity(self) -> str:
+        return self.hardware_serial or self.serial
 
     @property
     def name(self) -> str:
@@ -187,7 +222,56 @@ class Adb:
             manufacturer=properties.get("ro.product.manufacturer", ""),
             market_name=market_name,
             android=properties.get("ro.build.version.release", ""),
+            hardware_serial=properties.get("ro.serialno") or properties.get("ro.boot.serialno", ""),
         )
+
+    def connect(self, address: str) -> bool:
+        try:
+            output = self._run(["connect", address], timeout=20).decode("utf-8", "replace")
+        except AdbError:
+            output = ""
+        if "connected to" in output:
+            return True
+        self.disconnect(address)
+        time.sleep(0.8)
+        self.disconnect(address)
+        return False
+
+    def disconnect(self, address: str) -> None:
+        try:
+            self._run(["disconnect", address], timeout=8)
+        except AdbError:
+            pass
+
+    def ipv4_addresses(self, serial: str) -> list[str]:
+        output = self._run(["shell", "ip -4 -o addr show 2>/dev/null; true"], serial=serial, timeout=8)
+        found = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/", output.decode("utf-8", "replace"))
+        return [ip for ip in found if not ip.startswith("127.")]
+
+    def go_wireless(self, serial: str, extra_hosts: list[str], port: int = DEFAULT_TCP_PORT) -> str:
+        properties = self.properties(serial)
+        hardware = properties.get("ro.serialno") or properties.get("ro.boot.serialno", "")
+        phone_ips = self.ipv4_addresses(serial)
+        self._run(["tcpip", str(port)], serial=serial, timeout=15)
+        time.sleep(2.5)
+        hosts: list[str] = []
+        ordered = [ip for ip in phone_ips if is_tailscale_ip(ip)] + list(extra_hosts)
+        ordered += [ip for ip in phone_ips if not is_tailscale_ip(ip)]
+        for host in ordered:
+            if host not in hosts:
+                hosts.append(host)
+        for host in hosts:
+            address = f"{host}:{port}"
+            if not self.connect(address):
+                continue
+            try:
+                found = self.properties(address)
+            except AdbError:
+                found = {}
+            if not hardware or (found.get("ro.serialno") or found.get("ro.boot.serialno", "")) == hardware:
+                return address
+            self.disconnect(address)
+        raise AdbError("couldn't reach the phone over the network. Turn Tailscale on on the phone and try again")
 
     def screencap(self, serial: str) -> bytes:
         data = self._run(["exec-out", "screencap", "-p"], serial=serial, timeout=25)

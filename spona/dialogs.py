@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -98,10 +98,12 @@ class DeleteDialog(StyledDialog):
 
 
 class SettingsDialog(StyledDialog):
-    def __init__(self, values: dict, on_change, parent=None):
-        super().__init__("Settings", parent, 390)
+    def __init__(self, values: dict, on_change, parent=None, network: dict | None = None):
+        super().__init__("Settings", parent, 410)
         self._on_change = on_change
+        self._network = network or {}
         self._groups: dict[str, QButtonGroup] = {}
+        self._rows: dict[str, QPushButton] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(6)
@@ -124,6 +126,8 @@ class SettingsDialog(StyledDialog):
             values.get("delete_mode", "ask"),
             "Only screenshots copied with Auto-receive are also on the phone.",
         )
+        if network is not None:
+            self._tailscale_section(layout)
         close = QPushButton("Done")
         close.setObjectName("primary")
         close.setDefault(True)
@@ -152,6 +156,61 @@ class SettingsDialog(StyledDialog):
             hint.setWordWrap(True)
             layout.addWidget(hint)
         self._groups[key] = group
+
+    def _tailscale_section(self, layout) -> None:
+        layout.addSpacing(10)
+        section = QLabel("Tailscale")
+        section.setObjectName("section")
+        layout.addWidget(section)
+        enabled = QCheckBox("Use phones over Tailscale  ·  auto-reconnect")
+        enabled.setChecked(bool(self._network.get("enabled", True)))
+        enabled.toggled.connect(lambda checked: self._on_change("tailscale_enabled", checked))
+        layout.addWidget(enabled)
+        saved = self._network.get("saved") or []
+        if not saved:
+            empty = QLabel("No phones set up yet.")
+            empty.setObjectName("muted")
+            layout.addWidget(empty)
+        for entry in saved:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            name = QLabel(entry.get("name") or entry["address"])
+            address = QLabel(entry["address"])
+            address.setObjectName("muted")
+            forget = QPushButton("Forget")
+            forget.clicked.connect(
+                lambda _checked=False, value=entry["address"], widgets=(name, address): self._forget(value, widgets)
+            )
+            row.addWidget(name)
+            row.addWidget(address)
+            row.addStretch(1)
+            row.addWidget(forget)
+            layout.addLayout(row)
+            self._rows[entry["address"]] = forget
+        setup = QPushButton("Connect a phone…")
+        setup.clicked.connect(self._open_setup)
+        row = QHBoxLayout()
+        row.addWidget(setup)
+        row.addStretch(1)
+        layout.addSpacing(2)
+        layout.addLayout(row)
+
+    def _forget(self, address: str, widgets) -> None:
+        callback = self._network.get("on_forget")
+        if callback is not None:
+            callback(address)
+        for widget in widgets:
+            widget.setEnabled(False)
+        button = self._rows.get(address)
+        if button is not None:
+            button.setText("Forgotten")
+            button.setEnabled(False)
+
+    def _open_setup(self) -> None:
+        callback = self._network.get("on_setup")
+        self.accept()
+        if callback is not None:
+            QTimer.singleShot(0, callback)
 
 
 class SecretDialog(QDialog):
@@ -214,3 +273,125 @@ class SecretDialog(QDialog):
         if not result:
             self._input.clear()
         super().done(result)
+
+
+class NetworkDialog(StyledDialog):
+    go_wireless_requested = Signal(str)
+    connect_requested = Signal(str)
+
+    def __init__(self, usb_devices, peers, tailscale_found: bool, parent=None):
+        super().__init__("Connect over Tailscale", parent, 470)
+        self._buttons: list[QPushButton] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(6)
+        title = QLabel("Connect over Tailscale")
+        title.setObjectName("dialogTitle")
+        intro = QLabel("Use your phones without a cable, from anywhere on your tailnet.")
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(intro)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._heading("Set up once with USB"))
+        if usb_devices:
+            for serial, name in usb_devices:
+                layout.addLayout(
+                    self._row(name, "", "Go wireless", lambda _checked=False, value=serial: self._request_wireless(value))
+                )
+        else:
+            layout.addWidget(self._note("Plug a phone in with USB, then come back here."))
+
+        layout.addSpacing(10)
+        layout.addWidget(self._heading("Or connect directly"))
+        if not tailscale_found:
+            layout.addWidget(self._note("Tailscale isn't installed on this PC."))
+        phones = [peer for peer in peers if peer.os == "android"]
+        if tailscale_found and not phones:
+            layout.addWidget(self._note("No Android phones on your tailnet yet. Turn Tailscale on on the phone."))
+        for peer in phones[:6]:
+            button_text = "Connect" if peer.online else "Offline"
+            row = self._row(
+                peer.name,
+                peer.ip,
+                button_text,
+                lambda _checked=False, value=peer.ip: self._request_connect(value),
+                enabled=peer.online,
+            )
+            layout.addLayout(row)
+        address_row = QHBoxLayout()
+        address_row.setSpacing(8)
+        self._address = QLineEdit()
+        self._address.setPlaceholderText("Address, e.g. 100.101.102.103")
+        self._address.returnPressed.connect(lambda: self._request_connect(self._address.text()))
+        connect = QPushButton("Connect")
+        connect.clicked.connect(lambda: self._request_connect(self._address.text()))
+        self._buttons.append(connect)
+        address_row.addWidget(self._address, 1)
+        address_row.addWidget(connect)
+        layout.addSpacing(4)
+        layout.addLayout(address_row)
+
+        self._status = QLabel("")
+        self._status.setObjectName("status")
+        self._status.setWordWrap(True)
+        self._status.hide()
+        layout.addSpacing(6)
+        layout.addWidget(self._status)
+        done = QPushButton("Done")
+        done.setObjectName("primary")
+        done.clicked.connect(self.accept)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(done)
+        layout.addSpacing(8)
+        layout.addLayout(footer)
+
+    def _heading(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("section")
+        return label
+
+    def _note(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        return label
+
+    def _row(self, name: str, detail: str, action: str, handler, enabled: bool = True) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        label = QLabel(name)
+        row.addWidget(label)
+        if detail:
+            extra = QLabel(detail)
+            extra.setObjectName("muted")
+            row.addWidget(extra)
+        row.addStretch(1)
+        button = QPushButton(action)
+        button.setEnabled(enabled)
+        button.clicked.connect(handler)
+        self._buttons.append(button)
+        row.addWidget(button)
+        return row
+
+    def _request_wireless(self, serial: str) -> None:
+        self.set_status("Switching the phone to wireless and looking for it on Tailscale…", "busy")
+        self.go_wireless_requested.emit(serial)
+
+    def _request_connect(self, text: str) -> None:
+        if not text.strip():
+            self.set_status("Type the phone's Tailscale address first", "error")
+            return
+        self.set_status(f"Connecting to {text.strip()}…", "busy")
+        self.connect_requested.emit(text.strip())
+
+    def set_status(self, text: str, kind: str = "info") -> None:
+        self._status.setText(text)
+        self._status.setProperty("kind", kind)
+        self._status.style().unpolish(self._status)
+        self._status.style().polish(self._status)
+        self._status.show()
+        for button in self._buttons:
+            button.setEnabled(kind != "busy" and button.text() != "Offline")

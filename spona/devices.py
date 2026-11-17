@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QWidget
 
 from .adb import Device
 from .icons import Glyph, dot_icon, glyph_icon
+from .widgets import tool_button
 from .theme import ACCENT, IDLE, WARNING
 
 STATE_TEXT = {
@@ -25,9 +26,9 @@ def state_text(device: Device) -> str:
 
 
 def screen_text(device: Device) -> str:
+    parts = [device.transport] if device.network else []
     if not device.ready:
-        return state_text(device)
-    parts = []
+        return ", ".join(parts + [state_text(device)])
     if device.locked:
         parts.append("locked")
     if device.screen_on is False:
@@ -41,6 +42,8 @@ class DeviceBar(QWidget):
     unlock_requested = Signal(str)
     lock_requested = Signal(str)
     forget_secret_requested = Signal(str)
+    add_requested = Signal()
+    forget_network_requested = Signal(str)
     blocked = Signal(object)
 
     def __init__(self, deselected: set[str], has_secret: Callable[[str], bool], parent=None):
@@ -58,8 +61,10 @@ class DeviceBar(QWidget):
         self._empty_dot.setPixmap(dot_icon(IDLE).pixmap(QSize(10, 10)))
         self._empty = QLabel("No phone connected")
         self._empty.setObjectName("muted")
+        self._add_button = tool_button(Glyph.ADD, "Connect a phone over Tailscale", self.add_requested.emit, icon_size=16)
         self._layout.addWidget(self._empty_dot)
         self._layout.addWidget(self._empty)
+        self._layout.addWidget(self._add_button)
         self._layout.addStretch(1)
 
     def devices(self) -> list[Device]:
@@ -152,18 +157,26 @@ class DeviceBar(QWidget):
     def _show_menu(self, serial: str, position) -> None:
         device = self._device(serial)
         chip = self._chips.get(serial)
-        if device is None or chip is None or not device.ready:
+        if device is None or chip is None:
             return
         menu = QMenu(self)
+        if not device.ready:
+            if device.network:
+                menu.addAction("Forget this phone", lambda: self.forget_network_requested.emit(serial))
+                menu.exec(chip.mapToGlobal(position))
+            return
         menu.addAction(glyph_icon(Glyph.CAMERA, size=16), "Capture only this phone", lambda: self.capture_only.emit(serial))
         menu.addAction(glyph_icon(Glyph.UNLOCK, size=16), "Unlock", lambda: self.unlock_requested.emit(serial))
         menu.addAction(glyph_icon(Glyph.LOCK, size=16), "Lock (screen off)", lambda: self.lock_requested.emit(serial))
         menu.addSeparator()
         menu.addAction("Select only this one", lambda: self._select_only(serial))
         menu.addAction("Select all phones", self._select_all)
-        if self._has_secret(serial):
+        if self._has_secret(device.identity):
             menu.addSeparator()
             menu.addAction("Forget saved PIN", lambda: self.forget_secret_requested.emit(serial))
+        if device.network:
+            menu.addSeparator()
+            menu.addAction("Forget this phone (Tailscale)", lambda: self.forget_network_requested.emit(serial))
         menu.exec(chip.mapToGlobal(position))
 
     def _select_only(self, serial: str) -> None:

@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -9,9 +10,9 @@ from PySide6.QtCore import QByteArray, QFile, QSize, QStandardPaths, Qt, QThread
 from PySide6.QtGui import QActionGroup, QDesktopServices, QDrag, QGuiApplication, QImageReader, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget
 
-from .adb import Adb, Device, UnlockOutcome, find_adb
+from .adb import Adb, Device, UnlockOutcome, find_adb, normalize_address
 from .devices import DeviceBar, state_text
-from .dialogs import PHONE_SHOT_MODES, DeleteDialog, SecretDialog, SettingsDialog
+from .dialogs import PHONE_SHOT_MODES, DeleteDialog, NetworkDialog, SecretDialog, SettingsDialog
 from .origins import PhoneOrigins
 from .gallery import Gallery
 from .icons import Glyph, glyph_icon
@@ -23,11 +24,16 @@ from .naming import release_path, reserve_path, safe_name
 from .vault import Vault
 from .viewer import FullscreenViewer, ImageView
 from .widgets import ElidedLabel, Toast, separator, tool_button
+from .tailscale import find_tailscale, tailscale_peers
 from .workers import (
+    CallTask,
     CaptureSignals,
     CaptureTask,
     DeviceMonitor,
     LockTask,
+    NetworkReconnector,
+    NetworkSignals,
+    NetworkTask,
     DeleteSignals,
     PhoneDeleteTask,
     PhoneScreenshotWatcher,
@@ -119,6 +125,11 @@ class MainWindow(QMainWindow):
         self._brush = Brush.from_dict(settings.get("marker"))
         self._receiver: PhoneScreenshotWatcher | None = None
         self._origins = PhoneOrigins()
+        self._reconnector: NetworkReconnector | None = None
+        self._network_dialog: NetworkDialog | None = None
+        self._network_signals = NetworkSignals(self)
+        self._network_signals.finished.connect(self._on_network_finished)
+        self._network_signals.failed.connect(self._on_network_failed)
         self._delete_signals = DeleteSignals(self)
         self._delete_signals.finished.connect(self._on_phone_deleted)
         self._delete_signals.failed.connect(self._on_phone_delete_failed)
@@ -147,6 +158,8 @@ class MainWindow(QMainWindow):
         self._device_bar.unlock_requested.connect(self._unlock_serial)
         self._device_bar.lock_requested.connect(self._lock_serial)
         self._device_bar.forget_secret_requested.connect(self._forget_secret)
+        self._device_bar.add_requested.connect(self.open_network_dialog)
+        self._device_bar.forget_network_requested.connect(self._forget_network_address)
         self._device_bar.blocked.connect(self._on_blocked_device)
         self._adb_button = tool_button(Glyph.SEARCH, "Pick adb.exe manually", self._pick_adb, text="Find adb.exe")
         self._adb_button.hide()
@@ -311,8 +324,11 @@ class MainWindow(QMainWindow):
             self._receiver.received.connect(self._on_received)
             self._receiver.failed.connect(self._on_receive_failed)
             self._receiver.start()
+            self._reconnector = NetworkReconnector(self._adb, parent=self)
+            self._reconnector.start()
         self._update_status()
         self._sync_receiver()
+        self._sync_network()
 
     def _stop_workers(self) -> None:
         if self._monitor is not None:
@@ -321,6 +337,9 @@ class MainWindow(QMainWindow):
         if self._receiver is not None:
             self._receiver.stop()
             self._receiver = None
+        if self._reconnector is not None:
+            self._reconnector.stop()
+            self._reconnector = None
 
     def _sync_receiver(self) -> None:
         if self._receiver is None:
@@ -371,7 +390,7 @@ class MainWindow(QMainWindow):
         device = self._device(serial)
         name = device.name if device is not None else serial
         if not moved:
-            self._origins.remember(path, serial, remote, name)
+            self._origins.remember(path, device.identity if device is not None else serial, remote, name)
         self._loader.remember(path, QPixmap.fromImage(image))
         busy_drawing = self._fullscreen is not None and self._fullscreen.marker_active()
         self._gallery.add_batch([(path, QPixmap.fromImage(thumb))], select=not busy_drawing)
@@ -411,6 +430,22 @@ class MainWindow(QMainWindow):
 
     def _on_devices(self, devices: list[Device]) -> None:
         self._adb_error = None
+        usb_identities = {device.identity for device in devices if not device.network and device.hardware_serial}
+        saved = {entry["address"] for entry in self._network_devices()}
+        devices = [
+            device
+            for device in devices
+            if not device.network
+            or (device.identity not in usb_identities and (device.ready or device.serial in saved))
+        ]
+        names = {entry["address"]: entry.get("name") for entry in self._network_devices()}
+        devices = [
+            replace(device, market_name=names[device.serial])
+            if device.network and not device.ready and names.get(device.serial) and not device.market_name
+            else device
+            for device in devices
+        ]
+        self._remember_network_names(devices)
         arrived = [device for device in devices if device.ready and device.serial not in self._ready_serials]
         self._ready_serials = {device.serial for device in devices if device.ready}
         self._devices = devices
@@ -650,12 +685,16 @@ class MainWindow(QMainWindow):
         if device is not None and device.ready:
             self._start_unlock(device)
 
+    def _vault_key(self, serial: str) -> str:
+        device = self._device(serial)
+        return device.identity if device is not None else serial
+
     def _start_unlock(self, device: Device, secret: str | None = None, remember: bool = False) -> None:
         if self._adb is None or device.serial in self._screen_busy:
             return
         from_vault = False
-        if secret is None and self._vault.has(device.serial):
-            secret = self._vault.get(device.serial)
+        if secret is None and self._vault.has(device.identity):
+            secret = self._vault.get(device.identity)
             from_vault = secret is not None
         self._screen_busy[device.serial] = (secret, remember, from_vault)
         self._screen_pool.start(UnlockTask(self._adb, device.serial, secret, self._screen_signals))
@@ -668,7 +707,7 @@ class MainWindow(QMainWindow):
         self._screen_pool.start(LockTask(self._adb, serial, self._screen_signals))
 
     def _forget_secret(self, serial: str) -> None:
-        self._vault.forget(serial)
+        self._vault.forget(self._vault_key(serial))
         self._notify("Saved PIN removed", "ok")
 
     def _on_screen_action_finished(self, serial: str, outcome: str) -> None:
@@ -682,13 +721,13 @@ class MainWindow(QMainWindow):
         elif outcome == UnlockOutcome.ALREADY.value:
             self._notify(f"{name} is already unlocked", "ok")
         elif outcome == UnlockOutcome.UNLOCKED.value:
-            stored = bool(remember and secret and self._vault.set(serial, secret))
+            stored = bool(remember and secret and self._vault.set(self._vault_key(serial), secret))
             self._notify(f"Unlocked  ·  {name}" + ("  ·  PIN saved" if stored else ""), "ok")
         elif outcome == UnlockOutcome.NEEDS_SECRET.value:
             self._queue_secret_prompt(serial)
         elif outcome == UnlockOutcome.REJECTED.value:
             if from_vault:
-                self._vault.forget(serial)
+                self._vault.forget(self._vault_key(serial))
                 self._notify(f"Saved PIN was rejected  ·  {name}  ·  removed, enter it again", "error", 4500)
             else:
                 self._notify(f"PIN rejected  ·  {name}", "error", 3500)
@@ -838,14 +877,18 @@ class MainWindow(QMainWindow):
         by_serial: dict[str, list[str]] = {}
         for origin in jobs.values():
             by_serial.setdefault(origin["serial"], []).append(origin["remote"])
-        ready = {device.serial for device in self._devices if device.ready}
-        offline = [serial for serial in by_serial if serial not in ready]
+        live = {}
+        for device in self._devices:
+            if device.ready:
+                live.setdefault(device.serial, device.serial)
+                live.setdefault(device.identity, device.serial)
+        offline = [key for key in by_serial if key not in live]
         if self._adb is None or len(offline) == len(by_serial):
             self._notify("Deleted on PC  ·  phone not connected, kept there", "error", 3500)
             return
-        for serial, remotes in by_serial.items():
-            if serial in ready:
-                self._screen_pool.start(PhoneDeleteTask(self._adb, serial, remotes, self._delete_signals))
+        for key, remotes in by_serial.items():
+            if key in live:
+                self._screen_pool.start(PhoneDeleteTask(self._adb, live[key], remotes, self._delete_signals))
         if offline:
             self._notify("Deleted on PC  ·  some phones are not connected", "error", 3500)
 
@@ -862,15 +905,121 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         values = {"phone_shots": self._phone_mode, "delete_mode": self._settings.get("delete_mode", "ask")}
-        dialog = SettingsDialog(values, self._on_setting_changed, self._fullscreen or self)
+        network = {
+            "enabled": self._settings.get("tailscale_enabled", True),
+            "saved": self._network_devices(),
+            "on_forget": self._forget_network_address,
+            "on_setup": self.open_network_dialog,
+        }
+        dialog = SettingsDialog(values, self._on_setting_changed, self._fullscreen or self, network)
         dialog.exec()
         dialog.deleteLater()
 
     def _on_setting_changed(self, key: str, value) -> None:
         if key == "phone_shots":
             self._set_phone_mode(value)
+        elif key == "tailscale_enabled":
+            self._settings.set(key, bool(value))
+            self._sync_network()
+            if not value and self._adb is not None:
+                for entry in self._network_devices():
+                    self._screen_pool.start(CallTask(self._adb.disconnect, entry["address"]))
+            self._notify("Tailscale on  ·  saved phones reconnect by themselves" if value else "Tailscale off", "ok" if value else "info")
         else:
             self._settings.set(key, value)
+
+    def _network_devices(self) -> list[dict]:
+        entries = self._settings.get("network_devices") or []
+        return [entry for entry in entries if isinstance(entry, dict) and entry.get("address")]
+
+    def _save_network_device(self, address: str, identity: str, name: str) -> None:
+        entries = [entry for entry in self._network_devices() if entry["address"] != address]
+        if identity:
+            entries = [entry for entry in entries if entry.get("identity") != identity]
+        entries.append({"address": address, "identity": identity, "name": name})
+        self._settings.set("network_devices", entries)
+        self._settings.set("tailscale_enabled", True)
+        self._sync_network()
+
+    def _remember_network_names(self, devices: list[Device]) -> None:
+        entries = self._network_devices()
+        changed = False
+        for device in devices:
+            if not device.network or not device.ready:
+                continue
+            for entry in entries:
+                if entry["address"] == device.serial and (
+                    entry.get("name") != device.name or entry.get("identity") != device.identity
+                ):
+                    entry["name"] = device.name
+                    entry["identity"] = device.identity
+                    changed = True
+        if changed:
+            self._settings.set("network_devices", entries)
+
+    def _forget_network_address(self, address: str) -> None:
+        entries = [entry for entry in self._network_devices() if entry["address"] != address]
+        self._settings.set("network_devices", entries)
+        self._sync_network()
+        if self._adb is not None:
+            self._screen_pool.start(CallTask(self._adb.disconnect, address))
+        if self._monitor is not None:
+            self._monitor.poke()
+        self._notify(f"Forgot {address}")
+
+    def _sync_network(self) -> None:
+        if self._reconnector is None:
+            return
+        enabled = self._settings.get("tailscale_enabled", True)
+        self._reconnector.set_addresses([entry["address"] for entry in self._network_devices()] if enabled else [])
+
+    def open_network_dialog(self) -> None:
+        if self._network_dialog is not None:
+            self._network_dialog.raise_()
+            return
+        usb = [(device.serial, device.name) for device in self._devices if device.ready and not device.network]
+        dialog = NetworkDialog(usb, tailscale_peers(), find_tailscale() is not None, self._fullscreen or self)
+        dialog.go_wireless_requested.connect(self._go_wireless)
+        dialog.connect_requested.connect(self._connect_address)
+        self._network_dialog = dialog
+        dialog.exec()
+        self._network_dialog = None
+        dialog.deleteLater()
+
+    def _network_status(self, text: str, kind: str) -> None:
+        if self._network_dialog is not None:
+            self._network_dialog.set_status(text, kind)
+        else:
+            self._notify(text, "error" if kind == "error" else "ok", 3500)
+
+    def _go_wireless(self, serial: str) -> None:
+        if self._adb is None:
+            self._network_status("adb not found", "error")
+            return
+        hosts = [peer.ip for peer in tailscale_peers() if peer.online and peer.os == "android"]
+        self._screen_pool.start(NetworkTask(self._adb, "wireless", serial, self._network_signals, hosts))
+
+    def _connect_address(self, text: str) -> None:
+        address = normalize_address(text)
+        if self._adb is None or not address:
+            self._network_status("Type an address like 100.101.102.103", "error")
+            return
+        self._screen_pool.start(NetworkTask(self._adb, "connect", address, self._network_signals))
+
+    def _on_network_finished(self, action: str, key: str, address: str) -> None:
+        source = self._device(key) if action == "wireless" else None
+        name = source.name if source is not None else address
+        identity = source.identity if source is not None else ""
+        self._save_network_device(address, identity, name)
+        if self._monitor is not None:
+            self._monitor.poke()
+        if action == "wireless":
+            self._network_status(f"Ready  ·  {name} works over Tailscale at {address}. You can unplug the cable.", "ok")
+        else:
+            self._network_status(f"Connected to {address}", "ok")
+
+    def _on_network_failed(self, action: str, key: str, message: str) -> None:
+        self._network_status(message[:1].upper() + message[1:], "error")
 
     def copy_selected(self) -> None:
         self.copy_paths(self._selected_paths)
@@ -1058,7 +1207,7 @@ class MainWindow(QMainWindow):
         if stored and self.restoreGeometry(QByteArray.fromBase64(stored.encode("ascii"))):
             return
         available = self.screen().availableGeometry()
-        width = min(880, int(available.width() * 0.8))
+        width = min(1040, int(available.width() * 0.85))
         height = min(940, int(available.height() * 0.9))
         self.resize(width, height)
         self.move(available.center().x() - width // 2, available.center().y() - height // 2)

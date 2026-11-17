@@ -302,3 +302,90 @@ class PhoneDeleteTask(QRunnable):
             self._signals.failed.emit(self._serial, str(error))
             return
         self._signals.finished.emit(self._serial, removed, len(self._remote_paths))
+
+
+class NetworkSignals(QObject):
+    finished = Signal(str, str, str)
+    failed = Signal(str, str, str)
+
+
+class NetworkTask(QRunnable):
+    def __init__(self, adb: Adb, action: str, key: str, signals: NetworkSignals, hosts: list[str] | None = None):
+        super().__init__()
+        self._adb = adb
+        self._action = action
+        self._key = key
+        self._signals = signals
+        self._hosts = list(hosts or [])
+
+    def run(self):
+        try:
+            if self._action == "wireless":
+                address = self._adb.go_wireless(self._key, self._hosts)
+            else:
+                if not self._adb.connect(self._key):
+                    raise AdbError(
+                        f"couldn't connect to {self._key}. Plug the phone in once and use Go wireless first"
+                    )
+                address = self._key
+        except AdbError as error:
+            self._signals.failed.emit(self._action, self._key, str(error))
+            return
+        self._signals.finished.emit(self._action, self._key, address)
+
+
+class CallTask(QRunnable):
+    def __init__(self, function, *arguments):
+        super().__init__()
+        self._function = function
+        self._arguments = arguments
+
+    def run(self):
+        try:
+            self._function(*self._arguments)
+        except AdbError:
+            pass
+
+
+class NetworkReconnector(QThread):
+    def __init__(self, adb: Adb, interval: float = 8.0, parent=None):
+        super().__init__(parent)
+        self._adb = adb
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._addresses: list[str] = []
+        self._stopping = threading.Event()
+        self._wakeup = threading.Event()
+
+    def set_addresses(self, addresses: list[str]) -> None:
+        with self._lock:
+            self._addresses = list(addresses)
+        self._wakeup.set()
+
+    def run(self):
+        while not self._stopping.is_set():
+            with self._lock:
+                addresses = list(self._addresses)
+            if addresses:
+                try:
+                    present = {device.serial: device.state for device in self._adb.devices()}
+                except AdbError:
+                    present = {}
+                for address in addresses:
+                    if self._stopping.is_set():
+                        break
+                    state = present.get(address)
+                    if state == "device":
+                        continue
+                    if state is not None:
+                        self._adb.disconnect(address)
+                    self._adb.connect(address)
+            self._wakeup.wait(self._interval)
+            self._wakeup.clear()
+
+    def stop(self):
+        self._stopping.set()
+        self._wakeup.set()
+        if not self.wait(2000):
+            self.terminate()
+            self.wait(1000)

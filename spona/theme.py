@@ -73,6 +73,9 @@ QDialog QPushButton#danger:hover {{ background: rgba(239, 91, 91, 30); }}
 QDialog QPushButton#danger:disabled {{ border-color: #3a3d44; color: #55585f; }}
 QDialog QPushButton:focus {{ outline: none; }}
 QLabel#section {{ color: {TEXT}; font-weight: 600; }}
+QLabel#status {{ color: {MUTED}; padding: 8px 10px; border-radius: 8px; background: {BACKGROUND}; }}
+QLabel#status[kind="ok"] {{ color: {ACCENT}; }}
+QLabel#status[kind="error"] {{ color: {DANGER}; }}
 QRadioButton {{ spacing: 10px; padding: 4px 0; }}
 QRadioButton::indicator {{ width: 16px; height: 16px; border-radius: 9px; border: 1px solid #3a3d44; background: {BACKGROUND}; }}
 QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
