@@ -24,12 +24,15 @@ MARKET_NAME_PROPERTIES = (
 )
 PROPERTY_LINE = re.compile(r"^\[(?P<key>[^\]]+)\]:\s*\[(?P<value>.*)\]\s*$")
 PHONE_SCREENSHOT_FOLDERS = ("/sdcard/Pictures/Screenshots", "/sdcard/DCIM/Screenshots", "/sdcard/Screenshots")
-RECENT_SCREENSHOTS_COMMAND = (
-    "for d in " + " ".join(PHONE_SCREENSHOT_FOLDERS) + "; do "
-    '[ -d "$d" ] && ls -t "$d" 2>/dev/null | head -n 10 | while read -r f; do '
-    'stat -c "%s|%Y|%n" "$d/$f" 2>/dev/null; done; '
-    "done; true"
-)
+def recent_screenshots_command(folders, per_folder: int = 4) -> str:
+    return (
+        "for d in " + " ".join(folders) + "; do "
+        '[ -d "$d" ] && cd "$d" && ls -t 2>/dev/null | head -n ' + str(per_folder) + ' | '
+        'xargs stat -c "%s|%Y|$d/%n" 2>/dev/null; '
+        "done; true"
+    )
+
+
 SCREEN_STATE_COMMAND = (
     'dumpsys power 2>/dev/null | grep -m1 "mWakefulness="; '
     'dumpsys window 2>/dev/null | grep -m1 "isKeyguardShowing="; '
@@ -280,8 +283,8 @@ class Adb:
             raise AdbError("the phone did not return a screenshot")
         return data[start:]
 
-    def recent_screenshots(self, serial: str) -> list[tuple[str, int, int]]:
-        output = self._run(["shell", RECENT_SCREENSHOTS_COMMAND], serial=serial, timeout=10)
+    def recent_screenshots(self, serial: str, folders=PHONE_SCREENSHOT_FOLDERS) -> list[tuple[str, int, int]]:
+        output = self._run(["shell", recent_screenshots_command(folders)], serial=serial, timeout=10)
         entries = []
         for line in output.decode("utf-8", "replace").splitlines():
             parts = line.strip().split("|", 2)
@@ -304,6 +307,11 @@ class Adb:
             script.append(f"[ -e {quoted} ] && echo KEEP || echo GONE")
         output = self._run(["shell", "; ".join(script)], serial=serial, timeout=30).decode("utf-8", "replace")
         return output.split().count("GONE")
+
+    def file_size(self, serial: str, path: str) -> int:
+        output = self._run(["shell", "stat -c %s " + shlex.quote(path) + " 2>/dev/null; true"], serial=serial, timeout=8)
+        text = output.decode("utf-8", "replace").strip()
+        return int(text) if text.isdigit() else -1
 
     def read_file(self, serial: str, path: str) -> bytes:
         return self._run(["exec-out", "cat " + shlex.quote(path)], serial=serial, timeout=30)

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QImage
 
-from .adb import Adb, AdbError, Device
+from .adb import PHONE_SCREENSHOT_FOLDERS, Adb, AdbError, Device
 from .naming import release_path, reserve_path
 
 
@@ -150,11 +150,12 @@ class PhoneScreenshotWatcher(QThread):
 
     IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
-    def __init__(self, adb: Adb, thumb_bound: QSize, interval: float = 1.0, parent=None):
+    def __init__(self, adb: Adb, thumb_bound: QSize, interval: float = 0.33, parent=None, folders=None):
         super().__init__(parent)
         self._adb = adb
         self._thumb_bound = thumb_bound
         self._interval = interval
+        self._folders = tuple(folders) if folders else PHONE_SCREENSHOT_FOLDERS
         self._lock = threading.Lock()
         self._targets: dict[str, str] = {}
         self._folder: Path | None = None
@@ -194,7 +195,7 @@ class PhoneScreenshotWatcher(QThread):
 
     def _poll(self, serial: str, folder: Path | None, move: bool) -> None:
         entries = [
-            entry for entry in self._adb.recent_screenshots(serial)
+            entry for entry in self._adb.recent_screenshots(serial, self._folders)
             if entry[0].lower().endswith(self.IMAGE_SUFFIXES)
         ]
         if serial not in self._since:
@@ -206,14 +207,17 @@ class PhoneScreenshotWatcher(QThread):
         seen = self._seen[serial]
         pending = self._pending[serial]
         for path, size, modified in sorted(entries, key=lambda entry: entry[2]):
-            if path in seen or modified < since:
+            if path in seen or modified < since or size <= 0:
                 continue
-            if size > 0 and pending.get(path) == size:
-                seen.add(path)
-                pending.pop(path, None)
-                self._receive(serial, path, folder, move)
-            else:
-                pending[path] = size
+            if pending.get(path) != size:
+                time.sleep(0.25)
+                settled = self._adb.file_size(serial, path)
+                if settled != size:
+                    pending[path] = settled
+                    continue
+            seen.add(path)
+            pending.pop(path, None)
+            self._receive(serial, path, folder, move)
 
     def _receive(self, serial: str, remote_path: str, folder: Path | None, move: bool) -> None:
         if folder is None:
