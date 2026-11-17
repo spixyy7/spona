@@ -145,7 +145,7 @@ def save_image(data: bytes, target: Path, thumb_bound: QSize) -> tuple[QImage, Q
 
 
 class PhoneScreenshotWatcher(QThread):
-    received = Signal(str, str, QImage, QImage)
+    received = Signal(str, str, str, QImage, QImage)
     failed = Signal(str, str)
 
     IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
@@ -225,7 +225,7 @@ class PhoneScreenshotWatcher(QThread):
             return
         finally:
             release_path(target)
-        self.received.emit(serial, str(target), image, thumbnail)
+        self.received.emit(serial, str(target), remote_path, image, thumbnail)
 
     def stop(self):
         self._stopping.set()
@@ -271,3 +271,25 @@ class LockTask(QRunnable):
             self._signals.failed.emit(self._serial, str(error))
             return
         self._signals.finished.emit(self._serial, "locked")
+
+
+class DeleteSignals(QObject):
+    finished = Signal(str, int, int)
+    failed = Signal(str, str)
+
+
+class PhoneDeleteTask(QRunnable):
+    def __init__(self, adb: Adb, serial: str, remote_paths: list[str], signals: DeleteSignals):
+        super().__init__()
+        self._adb = adb
+        self._serial = serial
+        self._remote_paths = list(remote_paths)
+        self._signals = signals
+
+    def run(self):
+        try:
+            removed = self._adb.delete_files(self._serial, self._remote_paths)
+        except AdbError as error:
+            self._signals.failed.emit(self._serial, str(error))
+            return
+        self._signals.finished.emit(self._serial, removed, len(self._remote_paths))

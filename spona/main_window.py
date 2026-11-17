@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMe
 
 from .adb import Adb, Device, UnlockOutcome, find_adb
 from .devices import DeviceBar, state_text
-from .dialogs import SecretDialog
+from .dialogs import DeleteDialog, SecretDialog, SettingsDialog
+from .origins import PhoneOrigins
 from .gallery import Gallery
 from .icons import Glyph, glyph_icon
 from .images import ImageLoader, file_mime, side_by_side
@@ -27,6 +28,8 @@ from .workers import (
     CaptureTask,
     DeviceMonitor,
     LockTask,
+    DeleteSignals,
+    PhoneDeleteTask,
     PhoneScreenshotWatcher,
     ScreenSignals,
     UnlockTask,
@@ -115,6 +118,10 @@ class MainWindow(QMainWindow):
         self._annotations = AnnotationStore()
         self._brush = Brush.from_dict(settings.get("marker"))
         self._receiver: PhoneScreenshotWatcher | None = None
+        self._origins = PhoneOrigins()
+        self._delete_signals = DeleteSignals(self)
+        self._delete_signals.finished.connect(self._on_phone_deleted)
+        self._delete_signals.failed.connect(self._on_phone_delete_failed)
         self._build_ui()
         self._bind_shortcuts()
         self._restore_geometry()
@@ -152,6 +159,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self._adb_button)
         top_layout.addWidget(self._path_button)
         top_layout.addWidget(self._change_button)
+        top_layout.addWidget(tool_button(Glyph.SETTINGS, "Settings", self.open_settings))
 
         self._viewer = ImageView(framed=True)
         self._viewer.store = self._annotations
@@ -297,9 +305,10 @@ class MainWindow(QMainWindow):
         else:
             self._notify("Auto-receive off")
 
-    def _on_received(self, serial: str, path: str, image, thumb) -> None:
+    def _on_received(self, serial: str, path: str, remote: str, image, thumb) -> None:
         device = self._device(serial)
         name = device.name if device is not None else serial
+        self._origins.remember(path, serial, remote, name)
         self._loader.remember(path, QPixmap.fromImage(image))
         busy_drawing = self._fullscreen is not None and self._fullscreen.marker_active()
         self._gallery.add_batch([(path, QPixmap.fromImage(thumb))], select=not busy_drawing)
@@ -705,17 +714,71 @@ class MainWindow(QMainWindow):
         paths = list(paths)
         if not paths:
             return
+        on_phone = {path: self._origins.get(path) for path in paths if self._origins.get(path)}
+        mode = self._settings.get("delete_mode", "ask")
+        if mode == "ask":
+            devices = sorted({origin.get("device") or origin["serial"] for origin in on_phone.values()})
+            dialog = DeleteDialog(len(paths), len(on_phone), devices, self._fullscreen or self)
+            accepted = bool(dialog.exec())
+            choice, remember = dialog.choice, dialog.remember()
+            dialog.deleteLater()
+            if not accepted or choice is None:
+                return
+            if remember:
+                self._settings.set("delete_mode", choice)
+            also_phone = choice == "both"
+        else:
+            also_phone = mode == "both"
         deleted = [path for path in paths if move_to_trash(path)]
         for path in deleted:
             self._loader.forget(path)
             self._annotations.forget(path)
         self._gallery.remove_paths(deleted)
+        phone_jobs = {path: on_phone[path] for path in deleted if path in on_phone} if also_phone else {}
+        self._origins.forget(deleted)
         if len(deleted) < len(paths):
             self._notify(f"Not deleted: {len(paths) - len(deleted)}", "error")
-        elif len(deleted) == 1:
+            return
+        if phone_jobs:
+            self._delete_on_phones(phone_jobs)
+            return
+        if len(deleted) == 1:
             self._notify("Deleted  ·  moved to the Recycle Bin")
         else:
             self._notify(f"Deleted {len(deleted)} {images_word(len(deleted))}  ·  moved to the Recycle Bin")
+
+    def _delete_on_phones(self, jobs: dict[str, dict]) -> None:
+        by_serial: dict[str, list[str]] = {}
+        for origin in jobs.values():
+            by_serial.setdefault(origin["serial"], []).append(origin["remote"])
+        ready = {device.serial for device in self._devices if device.ready}
+        offline = [serial for serial in by_serial if serial not in ready]
+        if self._adb is None or len(offline) == len(by_serial):
+            self._notify("Deleted on PC  ·  phone not connected, kept there", "error", 3500)
+            return
+        for serial, remotes in by_serial.items():
+            if serial in ready:
+                self._screen_pool.start(PhoneDeleteTask(self._adb, serial, remotes, self._delete_signals))
+        if offline:
+            self._notify("Deleted on PC  ·  some phones are not connected", "error", 3500)
+
+    def _on_phone_deleted(self, serial: str, removed: int, total: int) -> None:
+        device = self._device(serial)
+        name = device.name if device is not None else "the phone"
+        if removed == total:
+            self._notify(f"Deleted on PC and {name}", "ok")
+        else:
+            self._notify(f"Deleted on PC  ·  {total - removed} not removed from {name}", "error", 3500)
+
+    def _on_phone_delete_failed(self, serial: str, message: str) -> None:
+        self._notify(f"Deleted on PC  ·  phone delete failed: {message}", "error", 4000)
+
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(
+            self._settings.get("delete_mode", "ask"), self._settings.set, self._fullscreen or self
+        )
+        dialog.exec()
+        dialog.deleteLater()
 
     def copy_selected(self) -> None:
         self.copy_paths(self._selected_paths)

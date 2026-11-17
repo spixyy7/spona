@@ -36,7 +36,8 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 - Select several shots (<kbd>Ctrl</kbd>/<kbd>Shift</kbd>-click, <kbd>Ctrl</kbd>+<kbd>A</kbd>) to compare them side by side
 - Smooth fullscreen viewer that hides its controls while you look
 - Copy any image with <kbd>Ctrl</kbd>+<kbd>C</kbd>, the right-click menu, or by dragging it into another app. It pastes as an image in chat apps and as a file in Explorer
-- Delete to the Recycle Bin, show the file in Explorer, change the save folder (your choice is remembered)
+- Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**
+- Show the file in Explorer, change the save folder (your choice is remembered)
 
 **Marker**
 - Draw on any screenshot in fullscreen: six colors, adjustable size and opacity, eraser, undo and redo
@@ -78,7 +79,7 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
 | <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy |
-| <kbd>Delete</kbd> | Move to the Recycle Bin |
+| <kbd>Delete</kbd> | Delete (asks PC only or PC + phone) |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open the screenshots folder |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Change the save folder |
 
@@ -108,6 +109,7 @@ Spona is a thin layer over standard `adb` commands:
 | Wake, lock | `input keyevent KEYCODE_WAKEUP` / `KEYCODE_SLEEP` |
 | Unlock | `wm dismiss-keyguard`, then `input text` with the PIN |
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
+| Delete on the phone | `content delete` on MediaStore, then `rm` |
 
 > [!NOTE]
 > Only PIN and password locks can be entered over adb. Pattern, fingerprint and face unlock are not supported.
@@ -120,6 +122,7 @@ Spona never writes inside its own folder. Everything it stores is local:
 | --- | --- |
 | Settings | `%APPDATA%\Spona\settings.json` |
 | Saved PINs (optional, encrypted with Windows DPAPI for your user) | `%APPDATA%\Spona\vault.json` |
+| Which received shots came from which phone (for PC + phone delete) | `%APPDATA%\Spona\origins.json` |
 | Screenshots | `Pictures\Spona`, or the folder you pick |
 
 Nothing is sent over the network.
@@ -139,7 +142,8 @@ spona/
 ├── gallery.py       thumbnail strip
 ├── images.py        image loading, caching and clipboard helpers
 ├── naming.py        safe, unique file names
-├── dialogs.py       PIN dialog
+├── dialogs.py       PIN, delete and settings dialogs
+├── origins.py       remembers where received shots live on the phone
 ├── vault.py         encrypted PIN storage
 ├── settings.py      settings file
 ├── theme.py         colors and styles

@@ -64,6 +64,15 @@ QDialog QPushButton {{ background: {SURFACE_HIGH}; border: 1px solid {BORDER}; b
 QDialog QPushButton:hover {{ border-color: #3a3d44; }}
 QDialog QPushButton#primary {{ background: {ACCENT}; border: none; color: {ACCENT_DARK}; font-weight: 600; }}
 QDialog QPushButton#primary:hover {{ background: #5be69c; }}
+QDialog QPushButton#danger {{ background: transparent; border: 1px solid {DANGER}; color: {DANGER}; font-weight: 600; }}
+QDialog QPushButton#danger:hover {{ background: rgba(239, 91, 91, 30); }}
+QDialog QPushButton#danger:disabled {{ border-color: #3a3d44; color: #55585f; }}
+QDialog QPushButton:focus {{ outline: none; }}
+QLabel#section {{ color: {TEXT}; font-weight: 600; }}
+QRadioButton {{ spacing: 10px; padding: 4px 0; }}
+QRadioButton::indicator {{ width: 16px; height: 16px; border-radius: 9px; border: 1px solid #3a3d44; background: {BACKGROUND}; }}
+QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
+QRadioButton::indicator:checked {{ border: 1px solid {ACCENT}; background: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5, stop: 0 {ACCENT}, stop: 0.48 {ACCENT}, stop: 0.56 {BACKGROUND}, stop: 1 {BACKGROUND}); }}
 QLabel#counter {{ color: {MUTED}; padding: 0 6px; }}
 QSlider {{ background: transparent; min-height: 22px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #34373d; border-radius: 2px; }}

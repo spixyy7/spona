@@ -206,6 +206,21 @@ class Adb:
             entries.append((parts[2], int(parts[0]), int(parts[1])))
         return entries
 
+    def delete_files(self, serial: str, paths: list[str]) -> int:
+        script = []
+        for path in paths:
+            quoted = shlex.quote(path)
+            if not any(character in path for character in "'\"`$\\"):
+                storage = "/storage/emulated/0/" + path[len("/sdcard/"):] if path.startswith("/sdcard/") else path
+                where = f"_data='{storage}' OR _data='{path}'"
+                script.append(
+                    f'content delete --uri content://media/external/images/media --where "{where}" >/dev/null 2>&1'
+                )
+            script.append(f"rm -f {quoted}")
+            script.append(f"[ -e {quoted} ] && echo KEEP || echo GONE")
+        output = self._run(["shell", "; ".join(script)], serial=serial, timeout=30).decode("utf-8", "replace")
+        return output.split().count("GONE")
+
     def read_file(self, serial: str, path: str) -> bytes:
         return self._run(["exec-out", "cat " + shlex.quote(path)], serial=serial, timeout=30)
 

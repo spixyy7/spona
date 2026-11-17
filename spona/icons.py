@@ -29,6 +29,7 @@ class Glyph:
     ACCEPT = "\ue8fb"
     DOWNLOAD = "\ue896"
     PASTE = "\ue77f"
+    SETTINGS = "\ue713"
     UNLOCK = "\ue785"
 
 
