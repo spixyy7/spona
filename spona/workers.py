@@ -145,7 +145,7 @@ def save_image(data: bytes, target: Path, thumb_bound: QSize) -> tuple[QImage, Q
 
 
 class PhoneScreenshotWatcher(QThread):
-    received = Signal(str, str, str, QImage, QImage)
+    received = Signal(str, str, str, bool, QImage, QImage)
     failed = Signal(str, str)
 
     IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
@@ -158,16 +158,18 @@ class PhoneScreenshotWatcher(QThread):
         self._lock = threading.Lock()
         self._targets: dict[str, str] = {}
         self._folder: Path | None = None
+        self._move = False
         self._stopping = threading.Event()
         self._wakeup = threading.Event()
         self._since: dict[str, int] = {}
         self._seen: dict[str, set[str]] = {}
         self._pending: dict[str, dict[str, int]] = {}
 
-    def configure(self, targets: dict[str, str], folder: Path | None) -> None:
+    def configure(self, targets: dict[str, str], folder: Path | None, move: bool = False) -> None:
         with self._lock:
             self._targets = dict(targets)
             self._folder = folder
+            self._move = move
         self._wakeup.set()
 
     def run(self):
@@ -175,6 +177,7 @@ class PhoneScreenshotWatcher(QThread):
             with self._lock:
                 targets = dict(self._targets)
                 folder = self._folder
+                move = self._move
             for serial in [serial for serial in self._since if serial not in targets]:
                 self._since.pop(serial, None)
                 self._seen.pop(serial, None)
@@ -183,13 +186,13 @@ class PhoneScreenshotWatcher(QThread):
                 if self._stopping.is_set():
                     break
                 try:
-                    self._poll(serial, folder)
+                    self._poll(serial, folder, move)
                 except AdbError:
                     continue
             self._wakeup.wait(self._interval)
             self._wakeup.clear()
 
-    def _poll(self, serial: str, folder: Path | None) -> None:
+    def _poll(self, serial: str, folder: Path | None, move: bool) -> None:
         entries = [
             entry for entry in self._adb.recent_screenshots(serial)
             if entry[0].lower().endswith(self.IMAGE_SUFFIXES)
@@ -208,11 +211,11 @@ class PhoneScreenshotWatcher(QThread):
             if size > 0 and pending.get(path) == size:
                 seen.add(path)
                 pending.pop(path, None)
-                self._receive(serial, path, folder)
+                self._receive(serial, path, folder, move)
             else:
                 pending[path] = size
 
-    def _receive(self, serial: str, remote_path: str, folder: Path | None) -> None:
+    def _receive(self, serial: str, remote_path: str, folder: Path | None, move: bool) -> None:
         if folder is None:
             return
         name = remote_path.rsplit("/", 1)[-1]
@@ -225,7 +228,13 @@ class PhoneScreenshotWatcher(QThread):
             return
         finally:
             release_path(target)
-        self.received.emit(serial, str(target), remote_path, image, thumbnail)
+        moved = False
+        if move:
+            try:
+                moved = self._adb.delete_files(serial, [remote_path]) == 1
+            except AdbError:
+                moved = False
+        self.received.emit(serial, str(target), remote_path, moved, image, thumbnail)
 
     def stop(self):
         self._stopping.set()

@@ -6,12 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QFile, QSize, QStandardPaths, Qt, QThreadPool, QUrl
-from PySide6.QtGui import QDesktopServices, QDrag, QGuiApplication, QImageReader, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMenu, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QActionGroup, QDesktopServices, QDrag, QGuiApplication, QImageReader, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from .adb import Adb, Device, UnlockOutcome, find_adb
 from .devices import DeviceBar, state_text
-from .dialogs import DeleteDialog, SecretDialog, SettingsDialog
+from .dialogs import PHONE_SHOT_MODES, DeleteDialog, SecretDialog, SettingsDialog
 from .origins import PhoneOrigins
 from .gallery import Gallery
 from .icons import Glyph, glyph_icon
@@ -193,14 +193,33 @@ class MainWindow(QMainWindow):
             self.unlock_selected,
             text="Unlock",
         )
-        self._receive_button = tool_button(
-            Glyph.DOWNLOAD,
-            "Auto-receive\nWhen on, every screenshot you take on the phone itself\nis sent to this PC and shown here automatically",
-            self._toggle_auto_receive,
-            text="Auto-receive",
-        )
+        self._receive_button = tool_button(Glyph.DOWNLOAD, "", self._toggle_auto_receive, text="Auto-receive")
         self._receive_button.setCheckable(True)
-        self._receive_button.setChecked(bool(self._settings.get("auto_receive", False)))
+        self._receive_mode_button = tool_button(
+            Glyph.CHEVRON_DOWN, "What happens to screenshots taken on the phone", lambda: None, icon_size=12
+        )
+        self._receive_mode_button.setObjectName("chevron")
+        self._receive_mode_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._receive_menu = QMenu(self)
+        self._receive_actions = {}
+        receive_group = QActionGroup(self)
+        for mode, label in PHONE_SHOT_MODES:
+            action = self._receive_menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, value=mode: self._set_phone_mode(value))
+            action.setCheckable(True)
+            receive_group.addAction(action)
+            self._receive_actions[mode] = action
+        self._receive_mode_button.setMenu(self._receive_menu)
+        receive_box = QWidget()
+        receive_layout = QHBoxLayout(receive_box)
+        receive_layout.setContentsMargins(0, 0, 0, 0)
+        receive_layout.setSpacing(0)
+        receive_layout.addWidget(self._receive_button)
+        receive_layout.addWidget(self._receive_mode_button)
+        self._phone_mode = self._settings.get("phone_shots") or (
+            "copy" if self._settings.get("auto_receive") else "phone"
+        )
+        self._show_phone_mode()
         self._auto_copy_button = tool_button(
             Glyph.PASTE,
             "Auto-copy\nEvery new screenshot goes straight to the clipboard",
@@ -222,7 +241,7 @@ class MainWindow(QMainWindow):
         self._open_button = tool_button(Glyph.FOLDER_OPEN, "Open the screenshots folder (Ctrl+O)", self.open_folder)
         bottom_layout.addWidget(self._capture_button)
         bottom_layout.addWidget(self._unlock_button)
-        bottom_layout.addWidget(self._receive_button)
+        bottom_layout.addWidget(receive_box)
         bottom_layout.addWidget(self._auto_copy_button)
         bottom_layout.addSpacing(8)
         bottom_layout.addWidget(self._info_label, 1)
@@ -290,31 +309,65 @@ class MainWindow(QMainWindow):
     def _sync_receiver(self) -> None:
         if self._receiver is None:
             return
-        enabled = self._receive_button.isChecked() and self._settings.save_dir is not None
+        enabled = self._phone_mode != "phone" and self._settings.save_dir is not None
         targets = {device.serial: device.name for device in self._device_bar.selected()} if enabled else {}
-        self._receiver.configure(targets, self._settings.save_dir)
+        self._receiver.configure(targets, self._settings.save_dir, move=self._phone_mode == "move")
 
     def _toggle_auto_receive(self, checked: bool = False) -> None:
-        checked = self._receive_button.isChecked()
-        if checked:
-            self._ensure_folder()
-        self._settings.set("auto_receive", checked)
-        self._sync_receiver()
-        if checked:
-            self._notify("Auto-receive on  ·  take a screenshot on the phone and it shows up here", "ok", 3000)
+        if self._receive_button.isChecked():
+            self._set_phone_mode(self._settings.get("last_send_mode", "copy"))
         else:
-            self._notify("Auto-receive off")
+            self._set_phone_mode("phone")
 
-    def _on_received(self, serial: str, path: str, remote: str, image, thumb) -> None:
+    def _set_phone_mode(self, mode: str) -> None:
+        if mode not in ("phone", "copy", "move"):
+            mode = "phone"
+        if mode != "phone":
+            self._ensure_folder()
+            self._settings.set("last_send_mode", mode)
+        self._phone_mode = mode
+        self._settings.set("phone_shots", mode)
+        self._show_phone_mode()
+        self._sync_receiver()
+        messages = {
+            "phone": ("Phone screenshots stay on the phone", "info"),
+            "copy": ("Copy to PC  ·  phone screenshots show up here and stay on the phone", "ok"),
+            "move": ("Move to PC  ·  phone screenshots come here and are deleted from the phone", "ok"),
+        }
+        self._notify(*messages[mode], 3000)
+
+    def _show_phone_mode(self) -> None:
+        mode = self._phone_mode
+        self._receive_button.blockSignals(True)
+        self._receive_button.setChecked(mode != "phone")
+        self._receive_button.blockSignals(False)
+        self._receive_button.setText("Auto-move" if mode == "move" else "Auto-receive")
+        tips = {
+            "phone": "Off: screenshots taken on the phone stay there\nClick to start receiving them on this PC",
+            "copy": "Copy to PC: every screenshot taken on the phone shows up here\nand also stays on the phone",
+            "move": "Move to PC: every screenshot taken on the phone comes here\nand is then deleted from the phone",
+        }
+        self._receive_button.setToolTip(tips[mode] + "\nUse the arrow to choose")
+        for key, action in self._receive_actions.items():
+            action.setChecked(key == mode)
+
+    def _on_received(self, serial: str, path: str, remote: str, moved: bool, image, thumb) -> None:
         device = self._device(serial)
         name = device.name if device is not None else serial
-        self._origins.remember(path, serial, remote, name)
+        if not moved:
+            self._origins.remember(path, serial, remote, name)
         self._loader.remember(path, QPixmap.fromImage(image))
         busy_drawing = self._fullscreen is not None and self._fullscreen.marker_active()
         self._gallery.add_batch([(path, QPixmap.fromImage(thumb))], select=not busy_drawing)
         if not busy_drawing:
             self._show_paths([path], flash=True)
-        self._notify(f"From {name}  ·  {os.path.basename(path)}" + self._auto_copy([path]), "ok")
+        if moved:
+            prefix = f"Moved from {name}"
+        elif self._phone_mode == "move":
+            prefix = f"From {name}  ·  couldn't delete it on the phone"
+        else:
+            prefix = f"From {name}"
+        self._notify(f"{prefix}  ·  {os.path.basename(path)}" + self._auto_copy([path]), "ok")
 
     def _toggle_auto_copy(self, checked: bool = False) -> None:
         enabled = self._auto_copy_button.isChecked()
@@ -774,11 +827,16 @@ class MainWindow(QMainWindow):
         self._notify(f"Deleted on PC  ·  phone delete failed: {message}", "error", 4000)
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(
-            self._settings.get("delete_mode", "ask"), self._settings.set, self._fullscreen or self
-        )
+        values = {"phone_shots": self._phone_mode, "delete_mode": self._settings.get("delete_mode", "ask")}
+        dialog = SettingsDialog(values, self._on_setting_changed, self._fullscreen or self)
         dialog.exec()
         dialog.deleteLater()
+
+    def _on_setting_changed(self, key: str, value) -> None:
+        if key == "phone_shots":
+            self._set_phone_mode(value)
+        else:
+            self._settings.set(key, value)
 
     def copy_selected(self) -> None:
         self.copy_paths(self._selected_paths)

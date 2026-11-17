@@ -30,6 +30,10 @@ QToolButton:disabled {{ color: #55585f; }}
 QToolButton:checked {{ background: {ACCENT_TINT}; color: {ACCENT}; }}
 QToolButton:checked:hover {{ background: #20332a; }}
 QToolButton#path {{ color: {MUTED}; padding: 5px 8px; }}
+QToolButton#chevron {{ padding: 6px 3px; margin-left: 1px; }}
+QToolButton#chevron::menu-indicator {{ image: none; width: 0px; }}
+QMenu::item:checked {{ color: {ACCENT}; }}
+QMenu::indicator {{ width: 0px; }}
 QToolButton#path:hover {{ color: {TEXT}; }}
 QToolButton#chip {{ background: {BACKGROUND}; border: 1px solid {BORDER}; border-radius: 14px; padding: 4px 12px 4px 8px; color: {MUTED}; }}
 QToolButton#chip:hover {{ border-color: #3a3d44; color: {TEXT}; }}

@@ -23,7 +23,10 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 - Take a screenshot with one click, <kbd>F5</kbd> or <kbd>Space</kbd>; it is saved and shown immediately
 - Capture several phones at once. Every connected phone appears as a chip; pick the ones you want and they are captured in parallel and shown side by side
 - If a phone screen is off, Spona wakes it up, captures the lock screen, then turns the screen off again
-- **Auto-receive:** turn it on, take a screenshot on the phone the normal way, and it shows up on the PC a second later
+- **Auto-receive:** take a screenshot on the phone the normal way and it shows up on the PC a second later. The arrow next to the button picks what happens on the phone, and Spona remembers it:
+  - **Off**: keep it on the phone only
+  - **Copy to PC**: keep it on the phone too
+  - **Move to PC**: delete it from the phone once it is safely saved on the PC
 - **Auto-copy:** every new screenshot, captured or received, lands in the clipboard right away, ready to paste
 
 **Phones**
@@ -109,7 +112,7 @@ Spona is a thin layer over standard `adb` commands:
 | Wake, lock | `input keyevent KEYCODE_WAKEUP` / `KEYCODE_SLEEP` |
 | Unlock | `wm dismiss-keyguard`, then `input text` with the PIN |
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
-| Delete on the phone | `content delete` on MediaStore, then `rm` |
+| Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
 
 > [!NOTE]
 > Only PIN and password locks can be entered over adb. Pattern, fingerprint and face unlock are not supported.

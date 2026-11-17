@@ -18,6 +18,11 @@ DELETE_MODES = (
     ("pc", "PC only"),
     ("both", "PC and phone"),
 )
+PHONE_SHOT_MODES = (
+    ("phone", "Off  ·  keep on the phone only"),
+    ("copy", "Copy to PC  ·  keep on the phone too"),
+    ("move", "Move to PC  ·  delete from the phone"),
+)
 
 
 class StyledDialog(QDialog):
@@ -93,30 +98,32 @@ class DeleteDialog(StyledDialog):
 
 
 class SettingsDialog(StyledDialog):
-    def __init__(self, delete_mode: str, on_change, parent=None):
-        super().__init__("Settings", parent, 380)
+    def __init__(self, values: dict, on_change, parent=None):
+        super().__init__("Settings", parent, 390)
+        self._on_change = on_change
+        self._groups: dict[str, QButtonGroup] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         title = QLabel("Settings")
         title.setObjectName("dialogTitle")
-        section = QLabel("When deleting")
-        section.setObjectName("section")
         layout.addWidget(title)
-        layout.addSpacing(4)
-        layout.addWidget(section)
-        group = QButtonGroup(self)
-        for mode, label in DELETE_MODES:
-            option = QRadioButton(label)
-            option.setChecked(mode == delete_mode)
-            option.toggled.connect(lambda checked, value=mode: checked and on_change("delete_mode", value))
-            group.addButton(option)
-            layout.addWidget(option)
-        note = QLabel("Only screenshots that came in with Auto-receive are also on the phone.")
-        note.setObjectName("muted")
-        note.setWordWrap(True)
-        layout.addSpacing(2)
-        layout.addWidget(note)
+        self._section(
+            layout,
+            "phone_shots",
+            "Screenshots taken on the phone",
+            PHONE_SHOT_MODES,
+            values.get("phone_shots", "phone"),
+            None,
+        )
+        self._section(
+            layout,
+            "delete_mode",
+            "When deleting",
+            DELETE_MODES,
+            values.get("delete_mode", "ask"),
+            "Only screenshots copied with Auto-receive are also on the phone.",
+        )
         close = QPushButton("Done")
         close.setObjectName("primary")
         close.setDefault(True)
@@ -124,8 +131,27 @@ class SettingsDialog(StyledDialog):
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         buttons.addWidget(close)
-        layout.addSpacing(6)
+        layout.addSpacing(10)
         layout.addLayout(buttons)
+
+    def _section(self, layout, key: str, heading: str, modes, current: str, note: str | None) -> None:
+        layout.addSpacing(10)
+        section = QLabel(heading)
+        section.setObjectName("section")
+        layout.addWidget(section)
+        group = QButtonGroup(self)
+        for mode, label in modes:
+            option = QRadioButton(label)
+            option.setChecked(mode == current)
+            option.toggled.connect(lambda checked, value=mode: checked and self._on_change(key, value))
+            group.addButton(option)
+            layout.addWidget(option)
+        if note:
+            hint = QLabel(note)
+            hint.setObjectName("muted")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+        self._groups[key] = group
 
 
 class SecretDialog(QDialog):

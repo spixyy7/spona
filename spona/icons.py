@@ -30,6 +30,7 @@ class Glyph:
     DOWNLOAD = "\ue896"
     PASTE = "\ue77f"
     SETTINGS = "\ue713"
+    CHEVRON_DOWN = "\ue70d"
     UNLOCK = "\ue785"
 
 
