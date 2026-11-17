@@ -24,6 +24,7 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 - Capture several phones at once. Every connected phone appears as a chip; pick the ones you want and they are captured in parallel and shown side by side
 - If a phone screen is off, Spona wakes it up, captures the lock screen, then turns the screen off again
 - **Auto-receive:** turn it on, take a screenshot on the phone the normal way, and it shows up on the PC a second later
+- **Auto-copy:** every new screenshot, captured or received, lands in the clipboard right away, ready to paste
 
 **Phones**
 - Live status for each phone: connected, waiting for approval, offline, locked, screen off

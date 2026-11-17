@@ -28,6 +28,7 @@ class Glyph:
     SAVE = "\ue74e"
     ACCEPT = "\ue8fb"
     DOWNLOAD = "\ue896"
+    PASTE = "\ue77f"
     UNLOCK = "\ue785"
 
 

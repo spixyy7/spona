@@ -193,6 +193,14 @@ class MainWindow(QMainWindow):
         )
         self._receive_button.setCheckable(True)
         self._receive_button.setChecked(bool(self._settings.get("auto_receive", False)))
+        self._auto_copy_button = tool_button(
+            Glyph.PASTE,
+            "Auto-copy\nEvery new screenshot goes straight to the clipboard",
+            self._toggle_auto_copy,
+            text="Auto-copy",
+        )
+        self._auto_copy_button.setCheckable(True)
+        self._auto_copy_button.setChecked(bool(self._settings.get("auto_copy", False)))
         self._info_label = ElidedLabel()
         self._info_label.setObjectName("muted")
         self._copy_button = tool_button(Glyph.COPY, "Copy image (Ctrl+C)", self.copy_selected)
@@ -203,12 +211,11 @@ class MainWindow(QMainWindow):
             Glyph.PEN, "Marker: draw on the image in fullscreen (M)", self.open_marker
         )
         self._fullscreen_button = tool_button(Glyph.FULLSCREEN, "Fullscreen (F11 or double-click)", self.toggle_fullscreen)
-        self._open_button = tool_button(
-            Glyph.FOLDER_OPEN, "Open the screenshots folder (Ctrl+O)", self.open_folder, text="Open folder"
-        )
+        self._open_button = tool_button(Glyph.FOLDER_OPEN, "Open the screenshots folder (Ctrl+O)", self.open_folder)
         bottom_layout.addWidget(self._capture_button)
         bottom_layout.addWidget(self._unlock_button)
         bottom_layout.addWidget(self._receive_button)
+        bottom_layout.addWidget(self._auto_copy_button)
         bottom_layout.addSpacing(8)
         bottom_layout.addWidget(self._info_label, 1)
         bottom_layout.addWidget(self._copy_button)
@@ -298,7 +305,20 @@ class MainWindow(QMainWindow):
         self._gallery.add_batch([(path, QPixmap.fromImage(thumb))], select=not busy_drawing)
         if not busy_drawing:
             self._show_paths([path], flash=True)
-        self._notify(f"From {name}  ·  {os.path.basename(path)}", "ok")
+        self._notify(f"From {name}  ·  {os.path.basename(path)}" + self._auto_copy([path]), "ok")
+
+    def _toggle_auto_copy(self, checked: bool = False) -> None:
+        enabled = self._auto_copy_button.isChecked()
+        self._settings.set("auto_copy", enabled)
+        if enabled:
+            self._notify("Auto-copy on  ·  new screenshots go to the clipboard", "ok", 2600)
+        else:
+            self._notify("Auto-copy off")
+
+    def _auto_copy(self, paths: list[str]) -> str:
+        if not paths or not self._auto_copy_button.isChecked():
+            return ""
+        return "  ·  copied" if self.copy_paths(paths, quiet=True) else ""
 
     def _on_receive_failed(self, serial: str, message: str) -> None:
         device = self._device(serial)
@@ -453,14 +473,15 @@ class MainWindow(QMainWindow):
             self._gallery.add_batch(entries)
             self._show_paths([path for path, _thumb in entries], flash=True)
         self._update_status()
+        copied = self._auto_copy([path for path, _thumb in entries])
         if failed:
             problems = ", ".join(f"{device.name}: {error}" for device, error in failed)
             prefix = f"Saved {len(saved)}, failed  ·  " if saved else "Failed  ·  "
             self._notify(prefix + problems, "error", 5000)
         elif len(saved) == 1:
-            self._notify(f"Saved  ·  {os.path.basename(saved[0][1])}", "ok")
+            self._notify(f"Saved  ·  {os.path.basename(saved[0][1])}" + copied, "ok")
         else:
-            self._notify(f"Saved {len(saved)} {images_word(len(saved))}", "ok")
+            self._notify(f"Saved {len(saved)} {images_word(len(saved))}" + copied, "ok")
 
     def _show_paths(self, paths: list[str], flash: bool = False) -> None:
         self._selected_paths = list(paths)
@@ -699,10 +720,10 @@ class MainWindow(QMainWindow):
     def copy_selected(self) -> None:
         self.copy_paths(self._selected_paths)
 
-    def copy_paths(self, paths: list[str]) -> None:
+    def copy_paths(self, paths: list[str], quiet: bool = False) -> bool:
         paths = [path for path in paths if os.path.isfile(path)]
         if not paths:
-            return
+            return False
         pixmaps = []
         marked = False
         for path in paths[:MAX_SIDE_BY_SIDE]:
@@ -714,18 +735,23 @@ class MainWindow(QMainWindow):
                 marked = True
             pixmaps.append(pixmap)
         if not pixmaps:
-            self._notify("The image can't be opened", "error")
-            return
+            if not quiet:
+                self._notify("The image can't be opened", "error")
+            return False
         image = pixmaps[0].toImage() if len(pixmaps) == 1 else side_by_side(pixmaps)
         if marked:
             QGuiApplication.clipboard().setImage(image)
+        else:
+            QGuiApplication.clipboard().setMimeData(file_mime(paths, image))
+        if quiet:
+            return True
+        if marked:
             self._notify("Copied with your marks", "ok")
-            return
-        QGuiApplication.clipboard().setMimeData(file_mime(paths, image))
-        if len(paths) == 1:
+        elif len(paths) == 1:
             self._notify("Copied  ·  paste it as an image or as a file", "ok")
         else:
             self._notify(f"Copied {len(paths)} {images_word(len(paths))}  ·  paste as files or as one image", "ok")
+        return True
 
     def _full_pixmap(self, path: str) -> QPixmap | None:
         pixmap = self._loader.cached(path)
