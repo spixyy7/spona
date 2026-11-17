@@ -26,7 +26,12 @@ def state_text(device: Device) -> str:
 
 
 def screen_text(device: Device) -> str:
-    parts = [device.transport] if device.network else []
+    if device.network:
+        parts = [device.transport]
+    elif device.also_over:
+        parts = [f"USB + {device.also_over}"]
+    else:
+        parts = []
     if not device.ready:
         return ", ".join(parts + [state_text(device)])
     if device.locked:

@@ -431,6 +431,17 @@ class MainWindow(QMainWindow):
     def _on_devices(self, devices: list[Device]) -> None:
         self._adb_error = None
         usb_identities = {device.identity for device in devices if not device.network and device.hardware_serial}
+        doubled = {
+            device.identity: device.transport
+            for device in devices
+            if device.network and device.ready and device.identity in usb_identities
+        }
+        devices = [
+            replace(device, also_over=doubled[device.identity])
+            if not device.network and device.identity in doubled
+            else device
+            for device in devices
+        ]
         saved = {entry["address"] for entry in self._network_devices()}
         devices = [
             device

@@ -90,6 +90,7 @@ class Device:
     screen_on: bool | None = None
     locked: bool | None = None
     hardware_serial: str = ""
+    also_over: str = ""
 
     @property
     def ready(self) -> bool:
