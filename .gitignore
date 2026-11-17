@@ -10,3 +10,11 @@ Screenshot_*.png
 settings.json
 .idea/
 .vscode/
+vault.json
+origins.json
+*.tmp
+.env
+*.env
+*.key
+*.pem
+tskey*
