@@ -33,6 +33,7 @@ class Glyph:
     CHEVRON_DOWN = "\ue70d"
     MULTISELECT = "\ue762"
     ADD = "\ue710"
+    SELECT_ALL = "\ue8b3"
     UNLOCK = "\ue785"
 
 

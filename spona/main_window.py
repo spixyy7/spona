@@ -257,6 +257,10 @@ class MainWindow(QMainWindow):
             text="Select",
         )
         self._select_button.setCheckable(True)
+        self._select_all_button = tool_button(
+            Glyph.SELECT_ALL, "Select every screenshot in the folder (Ctrl+A)", self.select_all_or_clear, text="Select all"
+        )
+        self._select_all_button.hide()
         self._copy_button = tool_button(Glyph.COPY, "Copy image (Ctrl+C)", self.copy_selected)
         self._delete_button = tool_button(
             Glyph.DELETE, "Delete selected images (Delete), they go to the Recycle Bin", self.delete_selected
@@ -272,7 +276,13 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self._auto_copy_button)
         bottom_layout.addSpacing(8)
         bottom_layout.addWidget(self._info_label, 1)
-        bottom_layout.addWidget(self._select_button)
+        select_box = QWidget()
+        select_layout = QHBoxLayout(select_box)
+        select_layout.setContentsMargins(0, 0, 0, 0)
+        select_layout.setSpacing(2)
+        select_layout.addWidget(self._select_button)
+        select_layout.addWidget(self._select_all_button)
+        bottom_layout.addWidget(select_box)
         bottom_layout.addWidget(self._copy_button)
         bottom_layout.addWidget(self._delete_button)
         bottom_layout.addWidget(self._marker_button)
@@ -296,7 +306,7 @@ class MainWindow(QMainWindow):
             (("Ctrl+L",), self.change_folder),
             (("Ctrl+U",), self.unlock_selected),
             (("M",), self.open_marker),
-            (("Ctrl+A",), self._gallery.select_all),
+            (("Ctrl+A",), self.select_all_or_clear),
             (("Escape",), self._leave_selection),
             (("Left", "Up"), lambda: self._step(-1)),
             (("Right", "Down"), lambda: self._step(1)),
@@ -624,6 +634,7 @@ class MainWindow(QMainWindow):
         self._update_info()
         self._update_status()
         self._sync_fullscreen_counter()
+        self._update_select_all_button()
 
     def _on_full_ready(self, path: str, _pixmap) -> None:
         if path in self._selected_paths:
@@ -644,6 +655,7 @@ class MainWindow(QMainWindow):
     def _on_gallery_changed(self) -> None:
         self._update_info()
         self._sync_fullscreen_counter()
+        self._update_select_all_button()
 
     def _update_info(self) -> None:
         paths = self._selected_paths
@@ -806,6 +818,8 @@ class MainWindow(QMainWindow):
             lambda: self._copy_text("\n".join(paths)),
         )
         menu.addAction(glyph_icon(Glyph.FOLDER_OPEN, size=16), "Show in folder", lambda: self._reveal(paths[0]))
+        if self._gallery.count() > 1 and not self._all_selected():
+            menu.addAction(glyph_icon(Glyph.SELECT_ALL, size=16), "Select all  (Ctrl+A)", self.select_all_or_clear)
         if self._fullscreen is None:
             menu.addAction(glyph_icon(Glyph.FULLSCREEN, size=16), "Fullscreen  (F11)", self.toggle_fullscreen)
         menu.addSeparator()
@@ -836,6 +850,27 @@ class MainWindow(QMainWindow):
         self._select_button.blockSignals(True)
         self._select_button.setChecked(enabled)
         self._select_button.blockSignals(False)
+        self._select_all_button.setVisible(enabled)
+        self._update_select_all_button()
+
+    def _all_selected(self) -> bool:
+        count = self._gallery.count()
+        return count > 0 and len(self._selected_paths) == count
+
+    def _update_select_all_button(self) -> None:
+        if self._all_selected():
+            self._select_all_button.setText("Clear")
+            self._select_all_button.setToolTip("Deselect all screenshots")
+        else:
+            self._select_all_button.setText("Select all")
+            self._select_all_button.setToolTip("Select every screenshot in the folder (Ctrl+A)")
+
+    def select_all_or_clear(self) -> None:
+        if self._all_selected() and self._gallery.selection_mode:
+            self._gallery.clearSelection()
+        else:
+            self._gallery.select_all()
+            self._notify(f"Selected all {self._gallery.count()}  ·  Delete removes them, Esc stops", "info", 2400)
 
     def _leave_selection(self) -> None:
         if self._gallery.selection_mode:

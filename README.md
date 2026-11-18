@@ -45,7 +45,7 @@ You can also connect a phone that is already listening by typing its Tailscale a
 
 **Gallery**
 - Thumbnail strip of everything in the save folder, kept in sync with the disk
-- **Select** several shots the easy way: press **Select** (or click the round check on any thumbnail), then click or swipe over thumbnails. Delete removes them all at once with the same PC only / PC + phone prompt. <kbd>Ctrl</kbd>+<kbd>A</kbd> selects all, <kbd>Esc</kbd> stops
+- **Select** several shots the easy way: press **Select** (or click the round check on any thumbnail), then click or swipe over thumbnails. **Select all** (or <kbd>Ctrl</kbd>+<kbd>A</kbd>) picks everything and turns into **Clear**. Delete removes them all at once with the same PC only / PC + phone prompt. <kbd>Esc</kbd> stops
 - Selected shots are shown side by side to compare them
 - Smooth fullscreen viewer that hides its controls while you look
 - Copy any image with <kbd>Ctrl</kbd>+<kbd>C</kbd>, the right-click menu, or by dragging it into another app. It pastes as an image in chat apps and as a file in Explorer
@@ -90,7 +90,7 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 | <kbd>F11</kbd>, <kbd>F</kbd>, <kbd>Enter</kbd> or double-click | Toggle fullscreen |
 | <kbd>Esc</kbd> | Leave fullscreen |
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
-| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots (again to clear) |
 | <kbd>Esc</kbd> | Stop selecting |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy |
 | <kbd>Delete</kbd> | Delete (asks PC only or PC + phone) |
