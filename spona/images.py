@@ -92,6 +92,9 @@ class ImageLoader(QObject):
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
 
+    def wait_idle(self, milliseconds: int) -> None:
+        self._pool.waitForDone(milliseconds)
+
     def forget(self, path: str) -> None:
         self._cache.pop(path, None)
 

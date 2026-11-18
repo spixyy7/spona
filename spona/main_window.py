@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -138,6 +139,7 @@ class MainWindow(QMainWindow):
         self._restore_geometry()
         self._update_folder_button()
         self._gallery.load_folder(self._folder())
+        self._show_delete_mode()
         self._start_adb()
 
     def _build_ui(self) -> None:
@@ -888,6 +890,24 @@ class MainWindow(QMainWindow):
         elif len(self._selected_paths) > 1:
             self._gallery.go(max(0, self._gallery.currentRow()))
 
+    def _trash(self, paths: list[str]) -> list[str]:
+        self._loader.wait_idle(1500)
+        deleted = [path for path in paths if move_to_trash(path)]
+        remaining = [path for path in paths if path not in deleted and os.path.exists(path)]
+        if remaining:
+            time.sleep(0.3)
+            deleted += [path for path in remaining if move_to_trash(path)]
+        return deleted
+
+    def _show_delete_mode(self) -> None:
+        descriptions = {
+            "ask": "asks PC only or PC + phone",
+            "pc": "PC only, set in Settings",
+            "both": "PC and phone, set in Settings",
+        }
+        mode = self._settings.get("delete_mode", "ask")
+        self._delete_button.setToolTip(f"Delete selected (Delete)  ·  {descriptions.get(mode, descriptions['ask'])}")
+
     def delete_selected(self) -> None:
         self.delete_paths(self._selected_paths)
 
@@ -907,10 +927,11 @@ class MainWindow(QMainWindow):
                 return
             if remember:
                 self._settings.set("delete_mode", choice)
+                self._show_delete_mode()
             also_phone = choice == "both"
         else:
             also_phone = mode == "both"
-        deleted = [path for path in paths if move_to_trash(path)]
+        deleted = self._trash(paths)
         for path in deleted:
             self._loader.forget(path)
             self._annotations.forget(path)
@@ -974,6 +995,9 @@ class MainWindow(QMainWindow):
     def _on_setting_changed(self, key: str, value) -> None:
         if key == "phone_shots":
             self._set_phone_mode(value)
+        elif key == "delete_mode":
+            self._settings.set(key, value)
+            self._show_delete_mode()
         elif key == "tailscale_enabled":
             self._settings.set(key, bool(value))
             self._sync_network()
