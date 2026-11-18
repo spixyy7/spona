@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spona"
+version = "0.2.0"
+description = "Screenshots from one or more Android phones in one click. A small, fast desktop GUI over adb."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.8"]
+keywords = ["adb", "android", "screenshot", "pyside6", "tailscale"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Win32 (MS Windows)",
+    "Topic :: Utilities",
+]
+
+[project.gui-scripts]
+spona = "spona.app:main"
+
+[tool.setuptools]
+packages = ["spona"]

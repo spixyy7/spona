@@ -69,14 +69,23 @@ You need:
 2. **[Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)**. Spona finds `adb` on `PATH`, in `ANDROID_HOME` / `ANDROID_SDK_ROOT`, or in the usual SDK folders. If it is somewhere else, click **Find adb.exe** in the app.
 3. **USB debugging** turned on in the phone's Developer options
 
-Clone or download this repository, then from its folder:
+Clone or download this repository, then install it from its folder:
+
+```bash
+pip install .
+spona
+```
+
+`pip install .` adds a `spona` command that opens the app without a console window. Use `pip install -e .` instead if you want your own changes to apply right away.
+
+To run it without installing:
 
 ```bash
 pip install -r requirements.txt
 python -m spona
 ```
 
-On Windows you can also double-click `Spona.pyw` to start it without a console window.
+On Windows you can also double-click `Spona.pyw`.
 
 The first time you capture, Spona asks where to save screenshots and remembers your choice. You can change it later with **Change** in the top bar.
 

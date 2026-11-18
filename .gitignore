@@ -18,3 +18,4 @@ origins.json
 *.key
 *.pem
 tskey*
+*.egg-info/
