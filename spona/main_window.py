@@ -23,7 +23,7 @@ from .annotations import AnnotationStore, Brush, render_annotated
 from .naming import release_path, reserve_path, safe_name
 from .vault import Vault
 from .viewer import FullscreenViewer, ImageView
-from .widgets import ElidedLabel, Toast, separator, tool_button
+from .widgets import ElidedLabel, ResponsiveBar, Toast, separator, tool_button
 from .tailscale import find_tailscale, tailscale_peers
 from .workers import (
     CallTask,
@@ -295,6 +295,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._gallery)
         layout.addWidget(bottom)
         self.setCentralWidget(root)
+        self._bottom_fit = ResponsiveBar(
+            bottom,
+            [
+                [self._select_all_button, self._select_button, self._auto_copy_button],
+                [self._receive_button, self._unlock_button],
+                [self._capture_button],
+            ],
+            {self._info_label: [150, 110, 80, 0]},
+        )
+        self._top_fit = ResponsiveBar(top, [[self._path_button], [self._change_button]])
 
     def _bind_shortcuts(self) -> None:
         bindings = [
@@ -529,7 +539,7 @@ class MainWindow(QMainWindow):
         self._capture_button.setEnabled(bool(selected) and not busy and self._adb is not None)
         self._unlock_button.setEnabled(bool(selected) and self._adb is not None)
         if not busy:
-            self._capture_button.setText("Capture" if len(selected) <= 1 else f"Capture  ×{len(selected)}")
+            self._bottom_fit.set_text(self._capture_button, "Capture" if len(selected) <= 1 else f"Capture  ×{len(selected)}")
         has_images = bool(self._selected_paths)
         self._copy_button.setEnabled(has_images)
         self._delete_button.setEnabled(has_images)
@@ -577,7 +587,7 @@ class MainWindow(QMainWindow):
     def _show_capture_progress(self) -> None:
         batch = self._batch
         total = len(batch.devices)
-        self._capture_button.setText("Capturing…" if total == 1 else f"Capturing {batch.finished}/{total}…")
+        self._bottom_fit.set_text(self._capture_button, "Capturing…" if total == 1 else f"Capturing {batch.finished}/{total}…")
 
     def _on_captured(self, number: int, serial: str, path: str, image, thumb) -> None:
         if self._batch is None or number != self._batch.number:

@@ -1,7 +1,7 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QWidget
 
 from .adb import Device
 from .icons import Glyph, dot_icon, glyph_icon
@@ -101,6 +101,7 @@ class DeviceBar(QWidget):
     def _create_chip(self, serial: str) -> QToolButton:
         chip = QToolButton(self)
         chip.setObjectName("chip")
+        chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         chip.setIconSize(QSize(CHIP_ICON_SIZE, CHIP_ICON_SIZE))
         chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
