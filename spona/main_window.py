@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMe
 
 from .adb import Adb, Device, UnlockOutcome, find_adb, normalize_address
 from .devices import DeviceBar, state_text
-from .dialogs import PHONE_SHOT_MODES, DeleteDialog, NetworkDialog, SecretDialog, SettingsDialog
+from .dialogs import CLIPBOARD_MODES, PHONE_SHOT_MODES, DeleteDialog, NetworkDialog, SecretDialog, SettingsDialog
 from .origins import PhoneOrigins
 from .gallery import Gallery
 from .icons import Glyph, glyph_icon
@@ -29,6 +29,7 @@ from .tailscale import find_tailscale, tailscale_peers
 from .workers import (
     CallTask,
     CaptureSignals,
+    ClipboardBridge,
     CaptureTask,
     DeviceMonitor,
     LockTask,
@@ -44,6 +45,9 @@ from .workers import (
 
 MAX_SIDE_BY_SIDE = 8
 TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
+CLIP_HELPER = Path(__file__).with_name("clip_helper.dex")
+CLIP_LIMIT = 200_000
+CLIP_MODE_KEYS = tuple(mode for mode, _label in CLIPBOARD_MODES)
 FILE_PATTERN = re.compile(r"^Screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_(?P<device>.+?)(?:_\d+)?$")
 
 
@@ -60,6 +64,15 @@ def human_size(size: int) -> str:
 
 def images_word(count: int) -> str:
     return "image" if count == 1 else "images"
+
+
+def clipboard_text(mime) -> str:
+    if mime is None or not mime.hasText():
+        return ""
+    if mime.hasUrls() and all(url.isLocalFile() for url in mime.urls()):
+        return ""
+    text = mime.text()
+    return text if text.strip() else ""
 
 
 def move_to_trash(path: str) -> bool:
@@ -134,6 +147,14 @@ class MainWindow(QMainWindow):
         self._delete_signals = DeleteSignals(self)
         self._delete_signals.finished.connect(self._on_phone_deleted)
         self._delete_signals.failed.connect(self._on_phone_delete_failed)
+        self._clip_bridge: ClipboardBridge | None = None
+        self._clip_mode = self._settings.get("clipboard_sync", "off")
+        if self._clip_mode not in CLIP_MODE_KEYS:
+            self._clip_mode = "off"
+        self._clip_errors: dict[str, str] = {}
+        self._clip_announce = False
+        self._clip_too_long = False
+        QGuiApplication.clipboard().dataChanged.connect(self._on_pc_clipboard)
         self._build_ui()
         self._bind_shortcuts()
         self._restore_geometry()
@@ -348,9 +369,15 @@ class MainWindow(QMainWindow):
             self._receiver.start()
             self._reconnector = NetworkReconnector(self._adb, parent=self)
             self._reconnector.start()
+            if CLIP_HELPER.is_file():
+                self._clip_bridge = ClipboardBridge(self._adb, CLIP_HELPER, self)
+                self._clip_bridge.received.connect(self._on_phone_clipboard)
+                self._clip_bridge.ready.connect(self._on_clipboard_ready)
+                self._clip_bridge.failed.connect(self._on_clipboard_failed)
         self._update_status()
         self._sync_receiver()
         self._sync_network()
+        self._sync_clipboard()
 
     def _stop_workers(self) -> None:
         if self._monitor is not None:
@@ -362,6 +389,10 @@ class MainWindow(QMainWindow):
         if self._reconnector is not None:
             self._reconnector.stop()
             self._reconnector = None
+        if self._clip_bridge is not None:
+            self._clip_bridge.stop()
+            self._clip_bridge.deleteLater()
+            self._clip_bridge = None
 
     def _sync_receiver(self) -> None:
         if self._receiver is None:
@@ -443,6 +474,69 @@ class MainWindow(QMainWindow):
         device = self._device(serial)
         self._notify(f"Auto-receive failed  ·  {device.name if device is not None else serial}: {message}", "error", 4000)
 
+    def _sync_clipboard(self) -> None:
+        if self._clip_bridge is None:
+            return
+        on = self._clip_mode != "off"
+        self._clip_bridge.configure([device.serial for device in self._device_bar.selected()] if on else [])
+
+    def _set_clipboard_mode(self, mode: str) -> None:
+        if mode not in CLIP_MODE_KEYS:
+            mode = "off"
+        self._clip_mode = mode
+        self._settings.set("clipboard_sync", mode)
+        self._clip_errors.clear()
+        self._clip_announce = mode != "off"
+        self._sync_clipboard()
+        messages = {
+            "off": ("Clipboard sync off", "info"),
+            "both": ("Clipboard sync on  ·  PC ↔ phone", "ok"),
+            "to_phone": ("Clipboard sync on  ·  PC → phone", "ok"),
+            "to_pc": ("Clipboard sync on  ·  phone → PC", "ok"),
+        }
+        text, kind = messages[mode]
+        if mode != "off" and self._clip_bridge is None:
+            text, kind = "Clipboard sync needs adb", "error"
+        elif mode != "off" and not self._device_bar.selected():
+            text += "  ·  select a phone"
+        self._notify(text, kind, 2600)
+
+    def _on_pc_clipboard(self) -> None:
+        if self._clip_bridge is None or self._clip_mode not in ("both", "to_phone"):
+            return
+        text = clipboard_text(QGuiApplication.clipboard().mimeData())
+        if not text:
+            return
+        if len(text) > CLIP_LIMIT:
+            if not self._clip_too_long:
+                self._clip_too_long = True
+                self._notify("Clipboard text is too long to send to the phone", "error", 3000)
+            return
+        self._clip_too_long = False
+        self._clip_bridge.send(text)
+
+    def _on_phone_clipboard(self, serial: str, text: str) -> None:
+        if self._clip_mode not in ("both", "to_pc"):
+            return
+        if text != QGuiApplication.clipboard().text():
+            QGuiApplication.clipboard().setText(text)
+        device = self._device(serial)
+        self._notify(f"Clipboard  ·  from {device.name if device is not None else serial}", "ok", 1600)
+
+    def _on_clipboard_ready(self, serial: str) -> None:
+        self._clip_errors.pop(serial, None)
+        if self._clip_announce:
+            self._clip_announce = False
+            device = self._device(serial)
+            self._notify(f"Clipboard linked  ·  {device.name if device is not None else serial}", "ok", 2200)
+
+    def _on_clipboard_failed(self, serial: str, message: str) -> None:
+        device = self._device(serial)
+        if device is None or self._clip_errors.get(serial) == message:
+            return
+        self._clip_errors[serial] = message
+        self._notify(f"Clipboard sync  ·  {device.name}: {message}", "error", 4000)
+
     def _pick_adb(self) -> None:
         chosen, _filter = QFileDialog.getOpenFileName(
             self, "Select adb.exe", str(Path.home()), "adb (adb.exe adb);;All files (*)"
@@ -485,6 +579,7 @@ class MainWindow(QMainWindow):
         self._device_bar.set_devices(devices)
         self._update_status()
         self._sync_receiver()
+        self._sync_clipboard()
         if arrived and not self._first_scan:
             self._notify("Connected  ·  " + ", ".join(device.name for device in arrived), "ok")
         self._first_scan = False
@@ -495,11 +590,13 @@ class MainWindow(QMainWindow):
         self._ready_serials = set()
         self._device_bar.set_devices([])
         self._update_status()
+        self._sync_clipboard()
 
     def _on_device_selection(self) -> None:
         self._settings.deselected_devices = self._device_bar.deselected()
         self._update_status()
         self._sync_receiver()
+        self._sync_clipboard()
 
     def _on_blocked_device(self, device: Device) -> None:
         if device.state == "unauthorized":
@@ -981,7 +1078,11 @@ class MainWindow(QMainWindow):
         self._notify(f"Deleted on PC  ·  phone delete failed: {message}", "error", 4000)
 
     def open_settings(self) -> None:
-        values = {"phone_shots": self._phone_mode, "delete_mode": self._settings.get("delete_mode", "ask")}
+        values = {
+            "phone_shots": self._phone_mode,
+            "delete_mode": self._settings.get("delete_mode", "ask"),
+            "clipboard_sync": self._clip_mode,
+        }
         network = {
             "enabled": self._settings.get("tailscale_enabled", True),
             "saved": self._network_devices(),
@@ -998,6 +1099,8 @@ class MainWindow(QMainWindow):
         elif key == "delete_mode":
             self._settings.set(key, value)
             self._show_delete_mode()
+        elif key == "clipboard_sync":
+            self._set_clipboard_mode(value)
         elif key == "tailscale_enabled":
             self._settings.set(key, bool(value))
             self._sync_network()

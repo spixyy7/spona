@@ -1,4 +1,7 @@
+import base64
+import binascii
 import os
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -7,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QImage
 
-from .adb import PHONE_SCREENSHOT_FOLDERS, Adb, AdbError, Device
+from .adb import PHONE_SCREENSHOT_FOLDERS, Adb, AdbError, Device, clip_helper_command
 from .naming import release_path, reserve_path
 
 
@@ -393,3 +396,163 @@ class NetworkReconnector(QThread):
         if not self.wait(2000):
             self.terminate()
             self.wait(1000)
+
+
+class ClipboardSession(threading.Thread):
+    def __init__(self, adb: Adb, helper: Path, serial: str, bridge: "ClipboardBridge"):
+        super().__init__(daemon=True)
+        self._adb = adb
+        self._helper = helper
+        self.serial = serial
+        self._bridge = bridge
+        self._stopping = threading.Event()
+        self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+        self._process = None
+        self._ready = False
+        self._known: str | None = None
+        self._pending: str | None = None
+
+    def send(self, text: str) -> bool:
+        with self._lock:
+            if text == self._known:
+                return False
+            self._known = text
+            self._pending = text
+            self._changed.notify_all()
+        return True
+
+    def stop(self) -> None:
+        self._stopping.set()
+        with self._lock:
+            process = self._process
+            self._changed.notify_all()
+        if process is not None:
+            _end_process(process)
+
+    def run(self):
+        threading.Thread(target=self._write_loop, daemon=True).start()
+        delay = 2.0
+        while not self._stopping.is_set():
+            began = time.monotonic()
+            error = self._session()
+            if time.monotonic() - began > 60:
+                delay = 2.0
+            if self._stopping.wait(delay):
+                break
+            if error:
+                self._bridge.failed.emit(self.serial, error)
+            delay = min(delay * 2, 30.0)
+
+    def _session(self) -> str | None:
+        try:
+            remote = self._adb.install_clip_helper(self.serial, self._helper)
+            process = self._adb.open_shell(self.serial, clip_helper_command(remote))
+        except (AdbError, OSError) as error:
+            return str(error)
+        with self._lock:
+            self._process = process
+        if self._stopping.is_set():
+            _end_process(process)
+        noise: list[str] = []
+        try:
+            for raw in process.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("R "):
+                    with self._lock:
+                        self._ready = True
+                        self._changed.notify_all()
+                    self._bridge.ready.emit(self.serial)
+                elif line.startswith("C "):
+                    try:
+                        text = base64.b64decode(line[2:]).decode("utf-8", "replace")
+                    except (binascii.Error, ValueError):
+                        continue
+                    with self._lock:
+                        self._known = text
+                    self._bridge.received.emit(self.serial, text)
+                elif line.startswith("E "):
+                    self._bridge.failed.emit(self.serial, line[2:])
+                elif line and line != "A":
+                    noise.append(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self._lock:
+                self._ready = False
+                self._process = None
+            _end_process(process)
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+        return noise[-1] if noise else None
+
+    def _write_loop(self) -> None:
+        while True:
+            with self._lock:
+                while not self._stopping.is_set() and (self._pending is None or not self._ready):
+                    self._changed.wait()
+                if self._stopping.is_set():
+                    return
+                text, process = self._pending, self._process
+                self._pending = None
+            data = b"S " + base64.b64encode(text.encode("utf-8")) + b"\n"
+            try:
+                process.stdin.write(data)
+                process.stdin.flush()
+            except (OSError, ValueError, AttributeError):
+                with self._lock:
+                    if self._pending is None:
+                        self._pending = text
+                    if self._process is process:
+                        self._ready = False
+
+
+def _end_process(process) -> None:
+    try:
+        process.stdin.write(b"Q\n")
+        process.stdin.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        process.wait(0.4)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.stdin.close()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+class ClipboardBridge(QObject):
+    received = Signal(str, str)
+    ready = Signal(str)
+    failed = Signal(str, str)
+
+    def __init__(self, adb: Adb, helper: Path, parent=None):
+        super().__init__(parent)
+        self._adb = adb
+        self._helper = helper
+        self._sessions: dict[str, ClipboardSession] = {}
+
+    def configure(self, serials) -> None:
+        wanted = set(serials)
+        for serial in [serial for serial in self._sessions if serial not in wanted]:
+            self._sessions.pop(serial).stop()
+        for serial in sorted(wanted):
+            if serial not in self._sessions:
+                session = ClipboardSession(self._adb, self._helper, serial, self)
+                self._sessions[serial] = session
+                session.start()
+
+    def send(self, text: str) -> int:
+        return sum(1 for session in list(self._sessions.values()) if session.send(text))
+
+    def stop(self) -> None:
+        for session in self._sessions.values():
+            session.stop()
+        self._sessions.clear()

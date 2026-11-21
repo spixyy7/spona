@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import shlex
@@ -42,6 +43,12 @@ SCREEN_STATE_COMMAND = (
 
 
 DEFAULT_TCP_PORT = 5555
+PHONE_TEMP_FOLDER = "/data/local/tmp"
+CLIP_HELPER_CLASS = "app.spona.ClipHelper"
+
+
+def clip_helper_command(remote: str) -> str:
+    return f"CLASSPATH={shlex.quote(remote)} app_process / {CLIP_HELPER_CLASS}"
 
 
 class AdbError(Exception):
@@ -308,6 +315,33 @@ class Adb:
             script.append(f"[ -e {quoted} ] && echo KEEP || echo GONE")
         output = self._run(["shell", "; ".join(script)], serial=serial, timeout=30).decode("utf-8", "replace")
         return output.split().count("GONE")
+
+    def push(self, serial: str, local: Path, remote: str) -> None:
+        self._run(["push", str(local), remote], serial=serial, timeout=60)
+
+    def install_clip_helper(self, serial: str, helper: Path) -> str:
+        digest = hashlib.sha1(helper.read_bytes()).hexdigest()[:12]
+        remote = f"{PHONE_TEMP_FOLDER}/spona-clip-{digest}.dex"
+        script = (
+            f"[ -s {remote} ] && echo READY; "
+            f"for old in {PHONE_TEMP_FOLDER}/spona-clip-*.dex; do "
+            f'[ "$old" = {remote} ] || rm -f "$old"; done; true'
+        )
+        if b"READY" not in self._run(["shell", script], serial=serial, timeout=10):
+            self.push(serial, helper, remote)
+        return remote
+
+    def open_shell(self, serial: str, command: str) -> subprocess.Popen:
+        try:
+            return subprocess.Popen(
+                [self.path, "-s", serial, "shell", "-T", command],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except OSError as error:
+            raise AdbError(f"adb can't be started: {error}") from error
 
     def file_size(self, serial: str, path: str) -> int:
         output = self._run(["shell", "stat -c %s " + shlex.quote(path) + " 2>/dev/null; true"], serial=serial, timeout=8)

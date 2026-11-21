@@ -34,6 +34,7 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 - Unlock over adb: Spona wakes the screen, opens the PIN pad and types your PIN or password. You can let it remember the PIN; it is stored encrypted with Windows DPAPI
 - Right-click a phone to capture only that one, unlock it, lock it, or forget its saved PIN
 - **Tailscale:** use your phones without a cable, from anywhere on your tailnet. Everything above works the same way over the network
+- **Clipboard sync:** copy text on the PC and paste it on the phone, or the other way round. Pick **Both ways**, **PC → phone only** or **Phone → PC only** in **Settings → Clipboard**. It works with the selected phones, over USB or Tailscale. Text only
 
 **Tailscale setup** (needs [Tailscale](https://tailscale.com) on the PC and on the phone)
 1. Plug the phone in with USB once
@@ -134,6 +135,7 @@ Spona is a thin layer over standard `adb` commands:
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
 | Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
 | Tailscale | `adb tcpip 5555` once over USB, then `adb connect <tailscale-ip>:5555`; peers come from `tailscale status --json` |
+| Clipboard sync | pushes a small helper (`helper/ClipHelper.java`, built to `spona/clip_helper.dex`) to `/data/local/tmp` and runs it with `app_process` as the shell user. It listens for clipboard changes on the phone and sets the text Spona sends, all over one `adb shell` pipe |
 
 > [!NOTE]
 > Only PIN and password locks can be entered over adb. Pattern, fingerprint and face unlock are not supported.
@@ -150,7 +152,7 @@ Spona never writes inside its own folder. Everything it stores is local:
 | Saved Tailscale phones | `%APPDATA%\Spona\settings.json` |
 | Screenshots | `Pictures\Spona`, or the folder you pick |
 
-Spona itself sends nothing anywhere. With Tailscale, adb talks to your phone over your own tailnet.
+Spona itself sends nothing anywhere. With Tailscale, adb talks to your phone over your own tailnet. Clipboard sync is off until you turn it on, and copied text only travels between the PC and your own phones through adb.
 
 ## Project layout
 
@@ -160,7 +162,7 @@ spona/
 ├── main_window.py   main window and app logic
 ├── adb.py           adb wrapper: devices, screenshots, screen state, unlock, network mode
 ├── tailscale.py     lists phones on your tailnet
-├── workers.py       background threads: device monitor, capture, unlock, auto-receive, reconnect
+├── workers.py       background threads: device monitor, capture, unlock, auto-receive, reconnect, clipboard sync
 ├── devices.py       phone chips in the top bar
 ├── viewer.py        image view and fullscreen viewer
 ├── marker.py        marker toolbar
@@ -174,8 +176,14 @@ spona/
 ├── settings.py      settings file
 ├── theme.py         colors and styles
 ├── icons.py         icons and app icon
-└── widgets.py       small shared widgets
+├── widgets.py       small shared widgets
+└── clip_helper.dex  phone-side clipboard helper (built from helper/)
+helper/
+├── ClipHelper.java  clipboard helper that runs on the phone
+└── build.py         rebuilds clip_helper.dex (needs a JDK and the Android SDK)
 ```
+
+To rebuild the clipboard helper after changing it, set `ANDROID_HOME` (and `JAVA_HOME` if `javac` is not on `PATH`) and run `python helper/build.py`.
 
 ## License
 

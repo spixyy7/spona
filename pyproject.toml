@@ -24,3 +24,6 @@ spona = "spona.app:main"
 
 [tool.setuptools]
 packages = ["spona"]
+
+[tool.setuptools.package-data]
+spona = ["clip_helper.dex"]

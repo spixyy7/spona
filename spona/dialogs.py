@@ -23,6 +23,12 @@ PHONE_SHOT_MODES = (
     ("copy", "Copy to PC  ·  keep on the phone too"),
     ("move", "Move to PC  ·  delete from the phone"),
 )
+CLIPBOARD_MODES = (
+    ("off", "Off"),
+    ("both", "Both ways  ·  PC ↔ phone"),
+    ("to_phone", "PC → phone only"),
+    ("to_pc", "Phone → PC only"),
+)
 
 
 class StyledDialog(QDialog):
@@ -125,6 +131,14 @@ class SettingsDialog(StyledDialog):
             DELETE_MODES,
             values.get("delete_mode", "ask"),
             "Only screenshots copied with Auto-receive are also on the phone.",
+        )
+        self._section(
+            layout,
+            "clipboard_sync",
+            "Clipboard",
+            CLIPBOARD_MODES,
+            values.get("clipboard_sync", "off"),
+            "Copied text moves between this PC and the selected phones, over USB or Tailscale.",
         )
         if network is not None:
             self._tailscale_section(layout)
