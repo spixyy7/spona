@@ -127,6 +127,7 @@ class Gallery(QListWidget):
         self._items: dict[str, QListWidgetItem] = {}
         self._thumbs: dict[str, QPixmap] = {}
         self._folder: Path | None = None
+        self._hidden: set[str] = set()
         self.selection_mode = False
         self._swipe_select: bool | None = None
         self.placeholder = self._make_placeholder()
@@ -199,7 +200,7 @@ class Gallery(QListWidget):
         self.clear()
         self._items.clear()
         self._thumbs.clear()
-        for path in scan_images(self._folder):
+        for path in self._visible(scan_images(self._folder)):
             self.addItem(self._create_item(path))
         if self.count():
             self.setCurrentRow(0, QItemSelectionModel.SelectionFlag.ClearAndSelect)
@@ -261,7 +262,7 @@ class Gallery(QListWidget):
     def sync(self) -> None:
         if self._folder is None:
             return
-        on_disk = scan_images(self._folder)
+        on_disk = self._visible(scan_images(self._folder))
         present = set(on_disk)
         self.remove_paths([path for path in self._items if path not in present])
         added = False
@@ -274,6 +275,18 @@ class Gallery(QListWidget):
         self._watch()
         if added:
             self.contents_changed.emit()
+
+    def hide_paths(self, paths: list[str]) -> None:
+        normalized = [os.path.normpath(path) for path in paths]
+        self._hidden.update(normalized)
+        self.remove_paths([path for path in normalized if path in self._items])
+
+    def unhide_paths(self, paths: list[str]) -> None:
+        self._hidden.difference_update(os.path.normpath(path) for path in paths)
+        self._sync_timer.start()
+
+    def _visible(self, paths: list[str]) -> list[str]:
+        return [path for path in paths if path not in self._hidden] if self._hidden else paths
 
     def _create_item(self, path: str) -> QListWidgetItem:
         item = QListWidgetItem()

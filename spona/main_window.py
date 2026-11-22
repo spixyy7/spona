@@ -1,5 +1,6 @@
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -7,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QFile, QSize, QStandardPaths, Qt, QThreadPool, QUrl
+from PySide6.QtCore import QByteArray, QFile, QSize, QStandardPaths, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QActionGroup, QDesktopServices, QDrag, QGuiApplication, QImageReader, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget
 
@@ -25,6 +26,7 @@ from .naming import release_path, reserve_path, safe_name
 from .vault import Vault
 from .viewer import FullscreenViewer, ImageView
 from .widgets import ElidedLabel, ResponsiveBar, Toast, separator, tool_button
+from .filelocks import locking_processes, release_file
 from .tailscale import find_tailscale, tailscale_peers
 from .workers import (
     CallTask,
@@ -80,6 +82,94 @@ def move_to_trash(path: str) -> bool:
     if isinstance(result, tuple):
         return bool(result[0])
     return bool(result)
+
+
+def remove_for_good(path: str) -> bool:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        os.remove(path)
+    except OSError:
+        return not os.path.exists(path)
+    return True
+
+
+class TrashOutcome:
+    def __init__(self):
+        self.deleted: list[str] = []
+        self.forever: list[str] = []
+        self.stuck: list[str] = []
+        self.released: list[str] = []
+        self.holders: list[str] = []
+
+
+class DeleteReport:
+    def __init__(self, number: int, count: int, outcome: TrashOutcome, also_phone: bool, on_phone: int):
+        self.number = number
+        self.count = count
+        self.outcome = outcome
+        self.also_phone = also_phone
+        self.on_phone = on_phone
+        self.waiting: set[str] = set()
+        self.offline = 0
+        self.phone_removed = 0
+        self.phone_missed = 0
+        self.phone_names: list[str] = []
+        self.phone_errors: list[str] = []
+
+
+def delete_summary(report: DeleteReport) -> tuple[str, str]:
+    outcome = report.outcome
+    count = report.count
+    on_pc = len(outcome.deleted) + len(outcome.forever)
+    names = ", ".join(report.phone_names) or "the phone"
+    phone_clean = not (report.offline or report.phone_missed or report.phone_errors)
+    everywhere = (
+        report.also_phone and on_pc == count and report.on_phone == count
+        and report.phone_removed == count and phone_clean
+    )
+    parts = []
+    kind = "info"
+    if everywhere:
+        parts.append(f"Deleted on PC and {names}")
+        kind = "ok"
+    elif on_pc == count and not report.also_phone:
+        parts.append(
+            "Deleted  ·  moved to the Recycle Bin" if count == 1
+            else f"Deleted {count} {images_word(count)}  ·  moved to the Recycle Bin"
+        )
+    elif on_pc == count:
+        parts.append("Deleted on PC" if count == 1 else f"Deleted {count} on PC")
+    elif on_pc:
+        parts.append(f"Deleted {on_pc} on PC")
+    if outcome.stuck:
+        holder = ", ".join(outcome.holders) or "another app"
+        stuck = "" if count == 1 else f"{len(outcome.stuck)} "
+        parts.append(f"{stuck}in use by {holder}, deleted on PC once it's free")
+    if outcome.forever:
+        parts.append("no Recycle Bin there, deleted for good")
+    if report.also_phone and not everywhere:
+        if not report.on_phone:
+            parts.append("wasn't on the phone" if count == 1 else "weren't on the phone")
+        else:
+            if report.phone_removed:
+                there = report.phone_removed
+                parts.append(f"deleted on {names}" if there == count else f"{there} also deleted on {names}")
+            if report.offline:
+                parts.append("phone not connected, kept there")
+                kind = "error"
+            if report.phone_missed:
+                parts.append(f"{report.phone_missed} not removed from the phone")
+                kind = "error"
+            if report.phone_errors:
+                parts.append(f"phone delete failed: {report.phone_errors[0]}")
+                kind = "error"
+    if outcome.released:
+        parts.append(f"freed from {', '.join(outcome.released)}")
+    if not parts:
+        parts.append("Nothing deleted")
+        kind = "error"
+    text = "  ·  ".join(parts)
+    return text[:1].upper() + text[1:], kind
 
 
 class CaptureBatch:
@@ -147,6 +237,14 @@ class MainWindow(QMainWindow):
         self._delete_signals = DeleteSignals(self)
         self._delete_signals.finished.connect(self._on_phone_deleted)
         self._delete_signals.failed.connect(self._on_phone_delete_failed)
+        self._delete_counter = 0
+        self._delete_reports: dict[int, DeleteReport] = {}
+        self._pending_trash = [
+            path for path in self._settings.get("pending_trash") or [] if isinstance(path, str) and os.path.exists(path)
+        ]
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setInterval(4000)
+        self._pending_timer.timeout.connect(self._retry_pending_trash)
         self._clip_bridge: ClipboardBridge | None = None
         self._clip_mode = self._settings.get("clipboard_sync", "off")
         if self._clip_mode not in CLIP_MODE_KEYS:
@@ -159,7 +257,11 @@ class MainWindow(QMainWindow):
         self._bind_shortcuts()
         self._restore_geometry()
         self._update_folder_button()
+        self._gallery.hide_paths(self._pending_trash)
         self._gallery.load_folder(self._folder())
+        if self._pending_trash:
+            self._settings.set("pending_trash", list(self._pending_trash))
+            self._pending_timer.start()
         self._show_delete_mode()
         self._start_adb()
 
@@ -987,14 +1089,43 @@ class MainWindow(QMainWindow):
         elif len(self._selected_paths) > 1:
             self._gallery.go(max(0, self._gallery.currentRow()))
 
-    def _trash(self, paths: list[str]) -> list[str]:
+    def _trash(self, paths: list[str]) -> TrashOutcome:
         self._loader.wait_idle(1500)
-        deleted = [path for path in paths if move_to_trash(path)]
-        remaining = [path for path in paths if path not in deleted and os.path.exists(path)]
-        if remaining:
+        outcome = TrashOutcome()
+        retry = []
+        for path in paths:
+            if not os.path.exists(path) or move_to_trash(path):
+                outcome.deleted.append(path)
+            else:
+                retry.append(path)
+        if retry:
             time.sleep(0.3)
-            deleted += [path for path in remaining if move_to_trash(path)]
-        return deleted
+        for path in retry:
+            if not os.path.exists(path) or move_to_trash(path):
+                outcome.deleted.append(path)
+                continue
+            freed = False
+            for _attempt in range(3):
+                apps = release_file(path)
+                for app in apps:
+                    if app not in outcome.released:
+                        outcome.released.append(app)
+                if apps and (move_to_trash(path) or not os.path.exists(path)):
+                    freed = True
+                    break
+                if not apps:
+                    break
+                time.sleep(0.15)
+            if freed:
+                outcome.deleted.append(path)
+            elif not locking_processes(path) and remove_for_good(path):
+                outcome.forever.append(path)
+            else:
+                outcome.stuck.append(path)
+                for _pid, app in locking_processes(path):
+                    if app and app not in outcome.holders:
+                        outcome.holders.append(app)
+        return outcome
 
     def _show_delete_mode(self) -> None:
         descriptions = {
@@ -1028,26 +1159,25 @@ class MainWindow(QMainWindow):
             also_phone = choice == "both"
         else:
             also_phone = mode == "both"
-        deleted = self._trash(paths)
-        for path in deleted:
+        outcome = self._trash(paths)
+        gone = outcome.deleted + outcome.forever + outcome.stuck
+        for path in gone:
             self._loader.forget(path)
             self._annotations.forget(path)
-        self._gallery.remove_paths(deleted)
+        if outcome.stuck:
+            self._queue_pending_trash(outcome.stuck)
+        self._gallery.remove_paths(gone)
         self._gallery.set_selection_mode(False)
-        phone_jobs = {path: on_phone[path] for path in deleted if path in on_phone} if also_phone else {}
-        self._origins.forget(deleted)
-        if len(deleted) < len(paths):
-            self._notify(f"Not deleted: {len(paths) - len(deleted)}", "error")
-            return
+        phone_jobs = {path: on_phone[path] for path in paths if path in on_phone} if also_phone else {}
+        self._origins.forget(gone + list(phone_jobs))
+        self._delete_counter += 1
+        report = DeleteReport(self._delete_counter, len(paths), outcome, also_phone, len(phone_jobs))
         if phone_jobs:
-            self._delete_on_phones(phone_jobs)
-            return
-        if len(deleted) == 1:
-            self._notify("Deleted  ·  moved to the Recycle Bin")
-        else:
-            self._notify(f"Deleted {len(deleted)} {images_word(len(deleted))}  ·  moved to the Recycle Bin")
+            self._delete_on_phones(report, phone_jobs)
+        if not report.waiting:
+            self._finish_delete(report)
 
-    def _delete_on_phones(self, jobs: dict[str, dict]) -> None:
+    def _delete_on_phones(self, report: DeleteReport, jobs: dict[str, dict]) -> None:
         by_serial: dict[str, list[str]] = {}
         for origin in jobs.values():
             by_serial.setdefault(origin["serial"], []).append(origin["remote"])
@@ -1056,26 +1186,73 @@ class MainWindow(QMainWindow):
             if device.ready:
                 live.setdefault(device.serial, device.serial)
                 live.setdefault(device.identity, device.serial)
-        offline = [key for key in by_serial if key not in live]
-        if self._adb is None or len(offline) == len(by_serial):
-            self._notify("Deleted on PC  ·  phone not connected, kept there", "error", 3500)
-            return
         for key, remotes in by_serial.items():
-            if key in live:
-                self._screen_pool.start(PhoneDeleteTask(self._adb, live[key], remotes, self._delete_signals))
-        if offline:
-            self._notify("Deleted on PC  ·  some phones are not connected", "error", 3500)
+            if self._adb is None or key not in live:
+                report.offline += len(remotes)
+                continue
+            serial = live[key]
+            report.waiting.add(serial)
+            self._screen_pool.start(PhoneDeleteTask(report.number, self._adb, serial, remotes, self._delete_signals))
+        if report.waiting:
+            self._delete_reports[report.number] = report
 
-    def _on_phone_deleted(self, serial: str, removed: int, total: int) -> None:
+    def _on_phone_deleted(self, number: int, serial: str, removed: int, total: int) -> None:
+        report = self._delete_reports.get(number)
+        if report is None:
+            return
         device = self._device(serial)
         name = device.name if device is not None else "the phone"
-        if removed == total:
-            self._notify(f"Deleted on PC and {name}", "ok")
-        else:
-            self._notify(f"Deleted on PC  ·  {total - removed} not removed from {name}", "error", 3500)
+        if removed and name not in report.phone_names:
+            report.phone_names.append(name)
+        report.phone_removed += removed
+        report.phone_missed += total - removed
+        self._phone_part_done(report, serial)
 
-    def _on_phone_delete_failed(self, serial: str, message: str) -> None:
-        self._notify(f"Deleted on PC  ·  phone delete failed: {message}", "error", 4000)
+    def _on_phone_delete_failed(self, number: int, serial: str, message: str) -> None:
+        report = self._delete_reports.get(number)
+        if report is None:
+            return
+        report.phone_errors.append(message)
+        self._phone_part_done(report, serial)
+
+    def _phone_part_done(self, report: DeleteReport, serial: str) -> None:
+        report.waiting.discard(serial)
+        if not report.waiting:
+            self._delete_reports.pop(report.number, None)
+            self._finish_delete(report)
+
+    def _finish_delete(self, report: DeleteReport) -> None:
+        text, kind = delete_summary(report)
+        self._notify(text, kind, 2200 if kind != "error" and len(text) < 60 else 4200)
+
+    def _queue_pending_trash(self, paths: list[str]) -> None:
+        for path in paths:
+            if path not in self._pending_trash:
+                self._pending_trash.append(path)
+        self._settings.set("pending_trash", list(self._pending_trash))
+        self._gallery.hide_paths(paths)
+        if not self._pending_timer.isActive():
+            self._pending_timer.start()
+
+    def _retry_pending_trash(self) -> None:
+        freed = []
+        for path in list(self._pending_trash):
+            if not os.path.exists(path) or move_to_trash(path):
+                freed.append(path)
+            elif release_file(path) and (move_to_trash(path) or not os.path.exists(path)):
+                freed.append(path)
+        if freed:
+            self._pending_trash = [path for path in self._pending_trash if path not in freed]
+            self._settings.set("pending_trash", list(self._pending_trash))
+            self._gallery.unhide_paths(freed)
+            count = len(freed)
+            self._notify(
+                "Deleted on PC now  ·  the file is free" if count == 1 else f"Deleted {count} on PC now  ·  the files are free",
+                "ok",
+                2600,
+            )
+        if not self._pending_trash:
+            self._pending_timer.stop()
 
     def open_settings(self) -> None:
         values = {

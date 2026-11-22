@@ -50,7 +50,8 @@ You can also connect a phone that is already listening by typing its Tailscale a
 - Selected shots are shown side by side to compare them
 - Smooth fullscreen viewer that hides its controls while you look
 - Copy any image with <kbd>Ctrl</kbd>+<kbd>C</kbd>, the right-click menu, or by dragging it into another app. It pastes as an image in chat apps and as a file in Explorer
-- Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**
+- Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**. With PC + phone, each shot is deleted wherever it is, and Spona tells you where
+- Delete always works: if another app (OneDrive, an image viewer) keeps the file open, Spona frees it and deletes it anyway. If that is not possible, the shot is hidden and deleted as soon as the file is free, even after a restart
 - Show the file in Explorer, change the save folder (your choice is remembered)
 
 **Marker**
@@ -134,6 +135,7 @@ Spona is a thin layer over standard `adb` commands:
 | Unlock | `wm dismiss-keyguard`, then `input text` with the PIN |
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
 | Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
+| Delete a file another app keeps open | Windows Restart Manager names the app, then Spona closes only that app's handles to the file and moves it to the Recycle Bin |
 | Tailscale | `adb tcpip 5555` once over USB, then `adb connect <tailscale-ip>:5555`; peers come from `tailscale status --json` |
 | Clipboard sync | pushes a small helper (`helper/ClipHelper.java`, built to `spona/clip_helper.dex`) to `/data/local/tmp` and runs it with `app_process` as the shell user. It listens for clipboard changes on the phone and sets the text Spona sends, all over one `adb shell` pipe |
 
@@ -172,6 +174,7 @@ spona/
 ├── naming.py        safe, unique file names
 ├── dialogs.py       PIN, delete and settings dialogs
 ├── origins.py       remembers where received shots live on the phone
+├── filelocks.py     finds and frees files other apps keep open
 ├── vault.py         encrypted PIN storage
 ├── settings.py      settings file
 ├── theme.py         colors and styles

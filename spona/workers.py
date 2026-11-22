@@ -290,13 +290,14 @@ class LockTask(QRunnable):
 
 
 class DeleteSignals(QObject):
-    finished = Signal(str, int, int)
-    failed = Signal(str, str)
+    finished = Signal(int, str, int, int)
+    failed = Signal(int, str, str)
 
 
 class PhoneDeleteTask(QRunnable):
-    def __init__(self, adb: Adb, serial: str, remote_paths: list[str], signals: DeleteSignals):
+    def __init__(self, batch: int, adb: Adb, serial: str, remote_paths: list[str], signals: DeleteSignals):
         super().__init__()
+        self._batch = batch
         self._adb = adb
         self._serial = serial
         self._remote_paths = list(remote_paths)
@@ -306,9 +307,9 @@ class PhoneDeleteTask(QRunnable):
         try:
             removed = self._adb.delete_files(self._serial, self._remote_paths)
         except AdbError as error:
-            self._signals.failed.emit(self._serial, str(error))
+            self._signals.failed.emit(self._batch, self._serial, str(error))
             return
-        self._signals.finished.emit(self._serial, removed, len(self._remote_paths))
+        self._signals.finished.emit(self._batch, self._serial, removed, len(self._remote_paths))
 
 
 class NetworkSignals(QObject):
