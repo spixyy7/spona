@@ -1,7 +1,7 @@
 from collections import OrderedDict
 
 from PySide6.QtCore import QMimeData, QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, QUrl, Signal
-from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
@@ -18,21 +18,6 @@ def rounded(pixmap: QPixmap, radius: float) -> QPixmap:
     painter.drawPixmap(0, 0, pixmap)
     painter.end()
     return result
-
-
-def side_by_side(pixmaps: list[QPixmap], gap: int = 24, background: str = "#131417") -> QImage:
-    height = min(pixmap.height() for pixmap in pixmaps)
-    widths = [round(pixmap.width() * height / pixmap.height()) for pixmap in pixmaps]
-    image = QImage(sum(widths) + gap * (len(pixmaps) - 1), height, QImage.Format.Format_RGB32)
-    image.fill(QColor(background))
-    painter = QPainter(image)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    x = 0
-    for pixmap, width in zip(pixmaps, widths):
-        painter.drawPixmap(QRectF(x, 0, width, height), pixmap, QRectF(pixmap.rect()))
-        x += width + gap
-    painter.end()
-    return image
 
 
 def file_mime(paths: list[str], image: QImage | None = None) -> QMimeData:

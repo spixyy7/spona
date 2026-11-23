@@ -50,6 +50,11 @@ You can also connect a phone that is already listening by typing its Tailscale a
 - Selected shots are shown side by side to compare them
 - Smooth fullscreen viewer that hides its controls while you look
 - Copy any image with <kbd>Ctrl</kbd>+<kbd>C</kbd>, the right-click menu, or by dragging it into another app. It pastes as an image in chat apps and as a file in Explorer
+- Copy as many shots as you like at once. Pick how with the arrow next to Copy, the right-click menu or **Settings → Copying several images**:
+  - **Grid**: one image. Every shot stays whole, and tall and wide shots are fitted into even rows of the same height, so any mix of ratios looks tidy
+  - **Side by side**: one image, all shots in one row
+  - **Separate images**: each shot on its own, so a chat gets them as separate photos and Explorer as separate files
+  - Shots go in the order they were taken, and marks you drew are included
 - Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**. With PC + phone, each shot is deleted wherever it is, and Spona tells you where
 - Delete always works: if another app (OneDrive, an image viewer) keeps the file open, Spona frees it and deletes it anyway. If that is not possible, the shot is hidden and deleted as soon as the file is free, even after a restart
 - Show the file in Explorer, change the save folder (your choice is remembered)
@@ -103,7 +108,7 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
 | <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots (again to clear) |
 | <kbd>Esc</kbd> | Stop selecting |
-| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy (several shots: grid, side by side or separate, as chosen) |
 | <kbd>Delete</kbd> | Delete (asks PC only or PC + phone) |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open the screenshots folder |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Change the save folder |
@@ -171,6 +176,7 @@ spona/
 ├── annotations.py   strokes, undo/redo and rendering of marks
 ├── gallery.py       thumbnail strip
 ├── images.py        image loading, caching and clipboard helpers
+├── collage.py       grid and side-by-side layout for copying several shots
 ├── naming.py        safe, unique file names
 ├── dialogs.py       PIN, delete and settings dialogs
 ├── origins.py       remembers where received shots live on the phone

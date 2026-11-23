@@ -3,6 +3,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -18,7 +19,8 @@ from .dialogs import CLIPBOARD_MODES, PHONE_SHOT_MODES, DeleteDialog, NetworkDia
 from .origins import PhoneOrigins
 from .gallery import Gallery
 from .icons import Glyph, glyph_icon
-from .images import ImageLoader, file_mime, side_by_side
+from .collage import COPY_LAYOUTS, LAYOUT_NAMES
+from .images import ImageLoader, file_mime
 from .settings import APP_NAME, Settings
 from .theme import ACCENT_DARK, style_title_bar
 from .annotations import AnnotationStore, Brush, render_annotated
@@ -33,6 +35,8 @@ from .workers import (
     CaptureSignals,
     ClipboardBridge,
     CaptureTask,
+    CopySignals,
+    CopyTask,
     DeviceMonitor,
     LockTask,
     NetworkReconnector,
@@ -50,6 +54,10 @@ TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
 CLIP_HELPER = Path(__file__).with_name("clip_helper.dex")
 CLIP_LIMIT = 200_000
 CLIP_MODE_KEYS = tuple(mode for mode, _label in CLIPBOARD_MODES)
+COPY_LAYOUT_KEYS = tuple(mode for mode, _label in COPY_LAYOUTS)
+COPY_FOLDER = Path(tempfile.gettempdir()) / APP_NAME / "copies"
+COPY_GLYPHS = {"grid": Glyph.GRID, "row": Glyph.COLUMNS, "files": Glyph.PICTURES}
+COPY_AS = {"grid": "Copy as a grid", "row": "Copy side by side", "files": "Copy as separate images"}
 FILE_PATTERN = re.compile(r"^Screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_(?P<device>.+?)(?:_\d+)?$")
 
 
@@ -66,6 +74,23 @@ def human_size(size: int) -> str:
 
 def images_word(count: int) -> str:
     return "image" if count == 1 else "images"
+
+
+def file_time(path: str) -> tuple[float, str]:
+    try:
+        return os.path.getmtime(path), path
+    except OSError:
+        return 0.0, path
+
+
+def copied_text(count: int, layout: str, marked: int, rows) -> str:
+    if layout == "files":
+        text = f"Copied {count} separate images  ·  paste them into a chat or a folder"
+    elif layout == "grid" and rows and len(rows) > 1:
+        text = f"Copied {count} images as one grid  ·  {len(rows)} rows"
+    else:
+        text = f"Copied {count} images as one image, side by side"
+    return text + ("  ·  with your marks" if marked else "")
 
 
 def clipboard_text(mime) -> str:
@@ -252,6 +277,16 @@ class MainWindow(QMainWindow):
         self._clip_errors: dict[str, str] = {}
         self._clip_announce = False
         self._clip_too_long = False
+        self._copy_layout = self._settings.get("copy_layout", "grid")
+        if self._copy_layout not in COPY_LAYOUT_KEYS:
+            self._copy_layout = "grid"
+        self._copy_pool = QThreadPool(self)
+        self._copy_pool.setMaxThreadCount(1)
+        self._copy_signals = CopySignals(self)
+        self._copy_signals.finished.connect(self._on_copy_ready)
+        self._copy_signals.failed.connect(self._on_copy_failed)
+        self._copy_number = 0
+        self._copy_jobs: dict[int, tuple[int, str, int, bool]] = {}
         QGuiApplication.clipboard().dataChanged.connect(self._on_pc_clipboard)
         self._build_ui()
         self._bind_shortcuts()
@@ -386,7 +421,27 @@ class MainWindow(QMainWindow):
             Glyph.SELECT_ALL, "Select every screenshot in the folder (Ctrl+A)", self.select_all_or_clear, text="Select all"
         )
         self._select_all_button.hide()
-        self._copy_button = tool_button(Glyph.COPY, "Copy image (Ctrl+C)", self.copy_selected)
+        self._copy_button = tool_button(Glyph.COPY, "", self.copy_selected)
+        self._copy_mode_button = tool_button(Glyph.CHEVRON_DOWN, "How several images are copied", lambda: None, icon_size=12)
+        self._copy_mode_button.setObjectName("chevron")
+        self._copy_mode_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._copy_menu = QMenu(self)
+        self._copy_actions = {}
+        copy_group = QActionGroup(self)
+        for mode, label in COPY_LAYOUTS:
+            action = self._copy_menu.addAction(glyph_icon(COPY_GLYPHS[mode], size=16), label)
+            action.triggered.connect(lambda _checked=False, value=mode: self._set_copy_layout(value, copy_now=True))
+            action.setCheckable(True)
+            copy_group.addAction(action)
+            self._copy_actions[mode] = action
+        self._copy_mode_button.setMenu(self._copy_menu)
+        copy_box = QWidget()
+        copy_layout = QHBoxLayout(copy_box)
+        copy_layout.setContentsMargins(0, 0, 0, 0)
+        copy_layout.setSpacing(0)
+        copy_layout.addWidget(self._copy_button)
+        copy_layout.addWidget(self._copy_mode_button)
+        self._show_copy_layout()
         self._delete_button = tool_button(
             Glyph.DELETE, "Delete selected images (Delete), they go to the Recycle Bin", self.delete_selected
         )
@@ -408,7 +463,7 @@ class MainWindow(QMainWindow):
         select_layout.addWidget(self._select_button)
         select_layout.addWidget(self._select_all_button)
         bottom_layout.addWidget(select_box)
-        bottom_layout.addWidget(self._copy_button)
+        bottom_layout.addWidget(copy_box)
         bottom_layout.addWidget(self._delete_button)
         bottom_layout.addWidget(self._marker_button)
         bottom_layout.addWidget(self._fullscreen_button)
@@ -1018,11 +1073,21 @@ class MainWindow(QMainWindow):
             return
         count = len(paths)
         menu = QMenu(self._fullscreen or self)
-        menu.addAction(
-            glyph_icon(Glyph.COPY, size=16),
-            "Copy image  (Ctrl+C)" if count == 1 else f"Copy {count} {images_word(count)}",
-            lambda: self.copy_paths(paths),
-        )
+        if count == 1:
+            menu.addAction(glyph_icon(Glyph.COPY, size=16), "Copy image  (Ctrl+C)", lambda: self.copy_paths(paths))
+        else:
+            menu.addAction(
+                glyph_icon(COPY_GLYPHS[self._copy_layout], size=16),
+                f"Copy {count} images  ·  {LAYOUT_NAMES[self._copy_layout]}  (Ctrl+C)",
+                lambda: self.copy_paths(paths),
+            )
+            for mode in COPY_LAYOUT_KEYS:
+                if mode != self._copy_layout:
+                    menu.addAction(
+                        glyph_icon(COPY_GLYPHS[mode], size=16),
+                        COPY_AS[mode],
+                        lambda _checked=False, value=mode: self.copy_paths(paths, layout=value),
+                    )
         menu.addAction(
             glyph_icon(Glyph.LINK, size=16),
             "Copy path" if count == 1 else "Copy paths",
@@ -1259,6 +1324,7 @@ class MainWindow(QMainWindow):
             "phone_shots": self._phone_mode,
             "delete_mode": self._settings.get("delete_mode", "ask"),
             "clipboard_sync": self._clip_mode,
+            "copy_layout": self._copy_layout,
         }
         network = {
             "enabled": self._settings.get("tailscale_enabled", True),
@@ -1278,6 +1344,8 @@ class MainWindow(QMainWindow):
             self._show_delete_mode()
         elif key == "clipboard_sync":
             self._set_clipboard_mode(value)
+        elif key == "copy_layout":
+            self._set_copy_layout(value)
         elif key == "tailscale_enabled":
             self._settings.set(key, bool(value))
             self._sync_network()
@@ -1384,38 +1452,86 @@ class MainWindow(QMainWindow):
     def copy_selected(self) -> None:
         self.copy_paths(self._selected_paths)
 
-    def copy_paths(self, paths: list[str], quiet: bool = False) -> bool:
+    def copy_paths(self, paths: list[str], quiet: bool = False, layout: str | None = None) -> bool:
         paths = [path for path in paths if os.path.isfile(path)]
         if not paths:
             return False
-        pixmaps = []
-        marked = False
-        for path in paths[:MAX_SIDE_BY_SIDE]:
-            pixmap = self._full_pixmap(path)
-            if pixmap is None:
-                continue
-            if self._annotations.has(path):
-                pixmap = QPixmap.fromImage(render_annotated(pixmap, self._annotations.strokes(path)))
-                marked = True
-            pixmaps.append(pixmap)
-        if not pixmaps:
+        if len(paths) == 1:
+            return self._copy_one(paths[0], quiet)
+        layout = layout if layout in COPY_LAYOUT_KEYS else self._copy_layout
+        paths.sort(key=file_time)
+        items = [(path, tuple(self._annotations.strokes(path))) for path in paths]
+        marked = sum(1 for _path, strokes in items if strokes)
+        self._copy_number += 1
+        self._copy_jobs.clear()
+        if layout == "files" and not marked:
+            QGuiApplication.clipboard().setMimeData(file_mime(paths))
+            if not quiet:
+                self._notify(copied_text(len(paths), layout, 0, None), "ok", 2600)
+            return True
+        self._copy_jobs[self._copy_number] = (len(paths), layout, marked, quiet)
+        self._copy_pool.start(CopyTask(self._copy_number, items, layout, COPY_FOLDER, self._copy_signals))
+        if not quiet:
+            self._notify(f"Copying {len(paths)} images…", "info", 10000)
+        return True
+
+    def _copy_one(self, path: str, quiet: bool) -> bool:
+        pixmap = self._full_pixmap(path)
+        if pixmap is None:
             if not quiet:
                 self._notify("The image can't be opened", "error")
             return False
-        image = pixmaps[0].toImage() if len(pixmaps) == 1 else side_by_side(pixmaps)
-        if marked:
-            QGuiApplication.clipboard().setImage(image)
-        else:
-            QGuiApplication.clipboard().setMimeData(file_mime(paths, image))
-        if quiet:
+        self._copy_number += 1
+        self._copy_jobs.clear()
+        if self._annotations.has(path):
+            QGuiApplication.clipboard().setImage(render_annotated(pixmap, self._annotations.strokes(path)))
+            if not quiet:
+                self._notify("Copied with your marks", "ok")
             return True
-        if marked:
-            self._notify("Copied with your marks", "ok")
-        elif len(paths) == 1:
+        QGuiApplication.clipboard().setMimeData(file_mime([path], pixmap.toImage()))
+        if not quiet:
             self._notify("Copied  ·  paste it as an image or as a file", "ok")
-        else:
-            self._notify(f"Copied {len(paths)} {images_word(len(paths))}  ·  paste as files or as one image", "ok")
         return True
+
+    def _on_copy_ready(self, number: int, image, paths, rows) -> None:
+        job = self._copy_jobs.pop(number, None)
+        if job is None:
+            return
+        count, layout, marked, quiet = job
+        QGuiApplication.clipboard().setMimeData(file_mime(list(paths), image))
+        if not quiet:
+            self._notify(copied_text(count, layout, marked, rows), "ok", 3000)
+
+    def _on_copy_failed(self, number: int, message: str) -> None:
+        job = self._copy_jobs.pop(number, None)
+        if job is not None and not job[3]:
+            self._notify(message, "error", 3000)
+
+    def _set_copy_layout(self, mode: str, copy_now: bool = False) -> None:
+        if mode not in COPY_LAYOUT_KEYS:
+            mode = "grid"
+        self._copy_layout = mode
+        self._settings.set("copy_layout", mode)
+        self._show_copy_layout()
+        if copy_now and len(self._selected_paths) > 1:
+            self.copy_paths(self._selected_paths)
+            return
+        messages = {
+            "grid": "Several images now copy as one grid",
+            "row": "Several images now copy as one image, side by side",
+            "files": "Several images now copy as separate images",
+        }
+        self._notify(messages[mode], "ok", 2600)
+
+    def _show_copy_layout(self) -> None:
+        tips = {
+            "grid": "one image, laid out as a grid",
+            "row": "one image, side by side",
+            "files": "separate images",
+        }
+        self._copy_button.setToolTip(f"Copy (Ctrl+C)\nSeveral images: {tips[self._copy_layout]}\nUse the arrow to choose")
+        for key, action in self._copy_actions.items():
+            action.setChecked(key == self._copy_layout)
 
     def _full_pixmap(self, path: str) -> QPixmap | None:
         pixmap = self._loader.cached(path)

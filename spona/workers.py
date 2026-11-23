@@ -8,10 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThread, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QImageReader
 
 from .adb import PHONE_SCREENSHOT_FOLDERS, Adb, AdbError, Device, clip_helper_command
-from .naming import release_path, reserve_path
+from .annotations import annotate_image
+from .collage import draw, oriented_size, plan
+from .naming import release_path, reserve_path, safe_name
 
 
 class DeviceMonitor(QThread):
@@ -340,6 +342,86 @@ class NetworkTask(QRunnable):
             self._signals.failed.emit(self._action, self._key, str(error))
             return
         self._signals.finished.emit(self._action, self._key, address)
+
+
+COPY_KEEP_SECONDS = 6 * 3600
+
+
+class CopySignals(QObject):
+    finished = Signal(int, object, object, object)
+    failed = Signal(int, str)
+
+
+class CopyTask(QRunnable):
+    def __init__(self, number: int, items, layout: str, folder: Path, signals: CopySignals):
+        super().__init__()
+        self._number = number
+        self._items = items
+        self._layout = layout
+        self._folder = folder
+        self._signals = signals
+
+    def run(self):
+        self._tidy()
+        if self._layout == "files":
+            self._separate()
+        else:
+            self._merge()
+
+    def _tidy(self) -> None:
+        try:
+            self._folder.mkdir(parents=True, exist_ok=True)
+            limit = time.time() - COPY_KEEP_SECONDS
+            for entry in self._folder.iterdir():
+                if entry.is_file() and entry.stat().st_mtime < limit:
+                    entry.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _read(self, path: str, strokes) -> QImage:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if strokes and not image.isNull():
+            image = annotate_image(image, strokes)
+        return image
+
+    def _stamp(self) -> str:
+        return time.strftime("%Y-%m-%d_%H-%M-%S")
+
+    def _separate(self) -> None:
+        paths = []
+        for path, strokes in self._items:
+            if not strokes:
+                paths.append(path)
+                continue
+            image = self._read(path, strokes)
+            if image.isNull():
+                continue
+            target = self._folder / f"{safe_name(Path(path).stem)}_marked_{self._stamp()}.png"
+            if image.save(str(target), "PNG", 50):
+                paths.append(str(target))
+        if not paths:
+            self._signals.failed.emit(self._number, "The images can't be opened")
+            return
+        self._signals.finished.emit(self._number, None, paths, None)
+
+    def _merge(self) -> None:
+        usable = []
+        sizes = []
+        for path, strokes in self._items:
+            size = oriented_size(path)
+            if size.isValid() and not size.isEmpty():
+                usable.append((path, strokes))
+                sizes.append(size)
+        if not usable:
+            self._signals.failed.emit(self._number, "The images can't be opened")
+            return
+        layout_plan = plan(sizes, self._layout)
+        image = draw((self._read(path, strokes) for path, strokes in usable), layout_plan)
+        target = self._folder / f"Spona_{self._layout}_{len(usable)}_{self._stamp()}.png"
+        paths = [str(target)] if image.save(str(target), "PNG", 50) else []
+        self._signals.finished.emit(self._number, image, paths, layout_plan.rows)
 
 
 class CallTask(QRunnable):

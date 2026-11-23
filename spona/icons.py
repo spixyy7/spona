@@ -35,6 +35,9 @@ class Glyph:
     ADD = "\ue710"
     SELECT_ALL = "\ue8b3"
     UNLOCK = "\ue785"
+    GRID = "\ue8a9"
+    COLUMNS = "\ue8c0"
+    PICTURES = "\ue7aa"
 
 
 _icon_family: list[str] = []

@@ -77,7 +77,11 @@ def paint_strokes(painter: QPainter, strokes) -> None:
 
 
 def render_annotated(pixmap: QPixmap, strokes) -> QImage:
-    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    return annotate_image(pixmap.toImage(), strokes)
+
+
+def annotate_image(image: QImage, strokes) -> QImage:
+    image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     paint_strokes(painter, strokes)

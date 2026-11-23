@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .collage import COPY_LAYOUTS
 from .theme import style_title_bar
 
 DELETE_MODES = (
@@ -105,7 +106,7 @@ class DeleteDialog(StyledDialog):
 
 class SettingsDialog(StyledDialog):
     def __init__(self, values: dict, on_change, parent=None, network: dict | None = None):
-        super().__init__("Settings", parent, 410)
+        super().__init__("Settings", parent, 760)
         self._on_change = on_change
         self._network = network or {}
         self._groups: dict[str, QButtonGroup] = {}
@@ -116,8 +117,17 @@ class SettingsDialog(StyledDialog):
         title = QLabel("Settings")
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
+        columns = QHBoxLayout()
+        columns.setSpacing(32)
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+        layout.addLayout(columns)
         self._section(
-            layout,
+            left,
             "phone_shots",
             "Screenshots taken on the phone",
             PHONE_SHOT_MODES,
@@ -125,7 +135,7 @@ class SettingsDialog(StyledDialog):
             None,
         )
         self._section(
-            layout,
+            left,
             "delete_mode",
             "When deleting",
             DELETE_MODES,
@@ -133,15 +143,25 @@ class SettingsDialog(StyledDialog):
             "Only screenshots copied with Auto-receive are also on the phone.",
         )
         self._section(
-            layout,
+            right,
             "clipboard_sync",
             "Clipboard",
             CLIPBOARD_MODES,
             values.get("clipboard_sync", "off"),
             "Copied text moves between this PC and the selected phones, over USB or Tailscale.",
         )
+        self._section(
+            right,
+            "copy_layout",
+            "Copying several images",
+            COPY_LAYOUTS,
+            values.get("copy_layout", "grid"),
+            "The grid keeps every shot whole and fits tall and wide ones into even rows.",
+        )
         if network is not None:
-            self._tailscale_section(layout)
+            self._tailscale_section(left)
+        left.addStretch(1)
+        right.addStretch(1)
         close = QPushButton("Done")
         close.setObjectName("primary")
         close.setDefault(True)
