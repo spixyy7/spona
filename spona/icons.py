@@ -38,6 +38,9 @@ class Glyph:
     GRID = "\ue8a9"
     COLUMNS = "\ue8c0"
     PICTURES = "\ue7aa"
+    PC = "\ue7f4"
+    HOST = "\ue704"
+    SEND = "\ue724"
 
 
 _icon_family: list[str] = []

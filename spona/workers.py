@@ -1,6 +1,7 @@
 import base64
 import binascii
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -107,34 +108,44 @@ class CaptureTask(QRunnable):
         self._signals = signals
         self._wake_screen = wake_screen
 
-    def _grab(self) -> bytes:
-        woke = False
-        if self._wake_screen:
-            try:
-                if not self._adb.screen_state(self._serial).awake:
-                    self._adb.wake(self._serial)
-                    woke = True
-                    time.sleep(0.8)
-            except AdbError:
-                woke = False
-        try:
-            return self._adb.screencap(self._serial)
-        finally:
-            if woke:
-                try:
-                    self._adb.sleep(self._serial)
-                except AdbError:
-                    pass
-
     def run(self):
         try:
-            image, thumbnail = save_image(self._grab(), self._target, self._thumb_bound)
+            image, thumbnail = save_image(grab_screen(self._adb, self._serial, self._wake_screen), self._target, self._thumb_bound)
         except (AdbError, OSError) as error:
             self._signals.failed.emit(self._batch, self._serial, str(error))
             return
         finally:
             release_path(self._target)
         self._signals.captured.emit(self._batch, self._serial, str(self._target), image, thumbnail)
+
+
+def grab_screen(adb: Adb, serial: str, wake_screen: bool = True) -> bytes:
+    woke = False
+    if wake_screen:
+        try:
+            if not adb.screen_state(serial).awake:
+                adb.wake(serial)
+                woke = True
+                time.sleep(0.8)
+        except AdbError:
+            woke = False
+    try:
+        return adb.screencap(serial)
+    finally:
+        if woke:
+            try:
+                adb.sleep(serial)
+            except AdbError:
+                pass
+
+
+def unlock_screen(adb: Adb, serial: str, secret: str | None) -> str:
+    return adb.unlock(serial, secret).value
+
+
+def lock_screen(adb: Adb, serial: str) -> str:
+    adb.sleep(serial)
+    return "locked"
 
 
 def save_image(data: bytes, target: Path, thumb_bound: QSize) -> tuple[QImage, QImage]:
@@ -162,33 +173,27 @@ class PhoneScreenshotWatcher(QThread):
         self._interval = interval
         self._folders = tuple(folders) if folders else PHONE_SCREENSHOT_FOLDERS
         self._lock = threading.Lock()
-        self._targets: dict[str, str] = {}
-        self._folder: Path | None = None
-        self._move = False
+        self._targets: dict[str, tuple[Path, bool]] = {}
         self._stopping = threading.Event()
         self._wakeup = threading.Event()
         self._since: dict[str, int] = {}
         self._seen: dict[str, set[str]] = {}
         self._pending: dict[str, dict[str, int]] = {}
 
-    def configure(self, targets: dict[str, str], folder: Path | None, move: bool = False) -> None:
+    def configure(self, targets: dict[str, tuple[Path, bool]]) -> None:
         with self._lock:
             self._targets = dict(targets)
-            self._folder = folder
-            self._move = move
         self._wakeup.set()
 
     def run(self):
         while not self._stopping.is_set():
             with self._lock:
                 targets = dict(self._targets)
-                folder = self._folder
-                move = self._move
             for serial in [serial for serial in self._since if serial not in targets]:
                 self._since.pop(serial, None)
                 self._seen.pop(serial, None)
                 self._pending.pop(serial, None)
-            for serial in targets:
+            for serial, (folder, move) in targets.items():
                 if self._stopping.is_set():
                     break
                 try:
@@ -229,6 +234,11 @@ class PhoneScreenshotWatcher(QThread):
             return
         name = remote_path.rsplit("/", 1)[-1]
         stem, dot, suffix = name.rpartition(".")
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.failed.emit(serial, str(error))
+            return
         target = reserve_path(folder, stem or name, f".{suffix}" if dot else ".png")
         try:
             image, thumbnail = save_image(self._adb.read_file(serial, remote_path), target, self._thumb_bound)
@@ -422,6 +432,62 @@ class CopyTask(QRunnable):
         target = self._folder / f"Spona_{self._layout}_{len(usable)}_{self._stamp()}.png"
         paths = [str(target)] if image.save(str(target), "PNG", 50) else []
         self._signals.finished.emit(self._number, image, paths, layout_plan.rows)
+
+
+class JobSignals(QObject):
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+
+class JobTask(QRunnable):
+    def __init__(self, number: int, signals: JobSignals, function, *arguments):
+        super().__init__()
+        self._number = number
+        self._signals = signals
+        self._function = function
+        self._arguments = arguments
+
+    def run(self):
+        try:
+            result = self._function(*self._arguments)
+        except (AdbError, OSError) as error:
+            self._signals.failed.emit(self._number, str(error) or "failed")
+            return
+        finally:
+            self._arguments = ()
+        self._signals.finished.emit(self._number, result)
+
+
+class ShotSignals(QObject):
+    ready = Signal(object, str, QImage, QImage)
+    failed = Signal(object, str)
+
+
+class ShotTask(QRunnable):
+    def __init__(self, ticket, path: str, thumb_bound: QSize, signals: ShotSignals, source: str | None = None):
+        super().__init__()
+        self._ticket = ticket
+        self._path = path
+        self._thumb_bound = thumb_bound
+        self._signals = signals
+        self._source = source
+
+    def run(self):
+        try:
+            if self._source is not None:
+                Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(self._source, self._path)
+            reader = QImageReader(self._path)
+            reader.setAutoTransform(True)
+            image = reader.read()
+        except OSError as error:
+            self._signals.failed.emit(self._ticket, str(error))
+            return
+        if image.isNull():
+            self._signals.failed.emit(self._ticket, "the image can't be opened")
+            return
+        thumbnail = image.scaled(self._thumb_bound, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._signals.ready.emit(self._ticket, self._path, image, thumbnail)
 
 
 class CallTask(QRunnable):
@@ -632,8 +698,13 @@ class ClipboardBridge(QObject):
                 self._sessions[serial] = session
                 session.start()
 
-    def send(self, text: str) -> int:
-        return sum(1 for session in list(self._sessions.values()) if session.send(text))
+    def send(self, text: str, serials=None) -> int:
+        wanted = None if serials is None else set(serials)
+        return sum(
+            1
+            for serial, session in list(self._sessions.items())
+            if (wanted is None or serial in wanted) and session.send(text)
+        )
 
     def stop(self) -> None:
         for session in self._sessions.values():

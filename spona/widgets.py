@@ -88,6 +88,8 @@ class ResponsiveBar(QObject):
         reserve = self._reserves.get(widget)
         if reserve is not None:
             return reserve[min(level, len(reserve) - 1)]
+        if hasattr(widget, "full_width"):
+            return widget.full_width()
         if widget.layout() is not None:
             return self._measure(widget.layout(), collapsed, level)
         return widget.sizeHint().width()

@@ -30,6 +30,13 @@ CLIPBOARD_MODES = (
     ("to_phone", "PC → phone only"),
     ("to_pc", "Phone → PC only"),
 )
+PC_OPTIONS = (
+    ("pc_sharing", "Share with my other PCs"),
+    ("pc_host", "Host  ·  lend this PC's phones to them"),
+    ("pc_send_clipboard", "Send what I copy"),
+    ("pc_send_shots", "Send new screenshots"),
+)
+PC_DEFAULTS = {"pc_sharing": True, "pc_host": False, "pc_send_clipboard": True, "pc_send_shots": True}
 
 
 class StyledDialog(QDialog):
@@ -105,12 +112,13 @@ class DeleteDialog(StyledDialog):
 
 
 class SettingsDialog(StyledDialog):
-    def __init__(self, values: dict, on_change, parent=None, network: dict | None = None):
-        super().__init__("Settings", parent, 760)
+    def __init__(self, values: dict, on_change, parent=None, network: dict | None = None, pcs: dict | None = None):
+        super().__init__("Settings", parent, 980)
         self._on_change = on_change
         self._network = network or {}
         self._groups: dict[str, QButtonGroup] = {}
         self._rows: dict[str, QPushButton] = {}
+        self._pc_boxes: dict[str, QCheckBox] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(6)
@@ -118,16 +126,19 @@ class SettingsDialog(StyledDialog):
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
         columns = QHBoxLayout()
-        columns.setSpacing(32)
-        left = QVBoxLayout()
-        left.setSpacing(6)
-        right = QVBoxLayout()
-        right.setSpacing(6)
-        columns.addLayout(left, 1)
-        columns.addLayout(right, 1)
+        columns.setSpacing(30)
+        phones = QVBoxLayout()
+        phones.setSpacing(6)
+        gallery = QVBoxLayout()
+        gallery.setSpacing(6)
+        computers = QVBoxLayout()
+        computers.setSpacing(6)
+        columns.addLayout(phones, 1)
+        columns.addLayout(gallery, 1)
+        columns.addLayout(computers, 1)
         layout.addLayout(columns)
         self._section(
-            left,
+            phones,
             "phone_shots",
             "Screenshots taken on the phone",
             PHONE_SHOT_MODES,
@@ -135,15 +146,7 @@ class SettingsDialog(StyledDialog):
             None,
         )
         self._section(
-            left,
-            "delete_mode",
-            "When deleting",
-            DELETE_MODES,
-            values.get("delete_mode", "ask"),
-            "Only screenshots copied with Auto-receive are also on the phone.",
-        )
-        self._section(
-            right,
+            phones,
             "clipboard_sync",
             "Clipboard",
             CLIPBOARD_MODES,
@@ -151,17 +154,28 @@ class SettingsDialog(StyledDialog):
             "Copied text moves between this PC and the selected phones, over USB or Tailscale.",
         )
         self._section(
-            right,
+            gallery,
             "copy_layout",
             "Copying several images",
             COPY_LAYOUTS,
             values.get("copy_layout", "grid"),
             "The grid keeps every shot whole and fits tall and wide ones into even rows.",
         )
+        self._section(
+            gallery,
+            "delete_mode",
+            "When deleting",
+            DELETE_MODES,
+            values.get("delete_mode", "ask"),
+            "Only screenshots copied with Auto-receive are also on the phone.",
+        )
+        if pcs is not None:
+            self._pc_section(computers, values, pcs)
         if network is not None:
-            self._tailscale_section(left)
-        left.addStretch(1)
-        right.addStretch(1)
+            self._tailscale_section(computers)
+        phones.addStretch(1)
+        gallery.addStretch(1)
+        computers.addStretch(1)
         close = QPushButton("Done")
         close.setObjectName("primary")
         close.setDefault(True)
@@ -228,6 +242,48 @@ class SettingsDialog(StyledDialog):
         row.addStretch(1)
         layout.addSpacing(2)
         layout.addLayout(row)
+
+    def _pc_section(self, layout, values: dict, pcs: dict) -> None:
+        layout.addSpacing(10)
+        section = QLabel("Other PCs")
+        section.setObjectName("section")
+        layout.addWidget(section)
+        for key, label in PC_OPTIONS:
+            box = QCheckBox(label)
+            box.setChecked(bool(values.get(key, PC_DEFAULTS[key])))
+            box.toggled.connect(lambda checked, value=key: self._on_pc_option(value, checked))
+            self._pc_boxes[key] = box
+            layout.addWidget(box)
+        hint = QLabel(
+            "PCs that run Spona on your Tailscale account show up next to the phones by themselves. "
+            "Click one to choose if things go there. A host's phones work on every PC, and the host is used first."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addSpacing(2)
+        layout.addWidget(hint)
+        self._pc_status = QLabel(pcs.get("status", ""))
+        self._pc_status.setObjectName("status")
+        self._pc_status.setWordWrap(True)
+        self._pc_status.setVisible(bool(pcs.get("status")))
+        layout.addSpacing(4)
+        layout.addWidget(self._pc_status)
+        self._sync_pc_boxes()
+
+    def _on_pc_option(self, key: str, checked: bool) -> None:
+        self._on_change(key, checked)
+        self._sync_pc_boxes()
+
+    def _sync_pc_boxes(self) -> None:
+        sharing = self._pc_boxes["pc_sharing"].isChecked()
+        for key, box in self._pc_boxes.items():
+            if key != "pc_sharing":
+                box.setEnabled(sharing)
+
+    def set_pc_status(self, text: str) -> None:
+        if hasattr(self, "_pc_status"):
+            self._pc_status.setText(text)
+            self._pc_status.setVisible(bool(text))
 
     def _forget(self, address: str, widgets) -> None:
         callback = self._network.get("on_forget")

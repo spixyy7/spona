@@ -13,7 +13,7 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-3ddc84)
 
-<img src="docs/screenshot.png" width="860" alt="Spona with two phones captured side by side">
+<img src="docs/screenshot.png" width="860" alt="Spona with a phone, a phone lent by another PC and two linked PCs">
 
 </div>
 
@@ -43,6 +43,15 @@ A small, fast desktop app built on `adb`. Plug in a phone over USB, press <kbd>F
 4. Unplug the cable. The phone shows up as *Phone · Tailscale* and Spona reconnects it by itself whenever it is reachable
 
 You can also connect a phone that is already listening by typing its Tailscale address. Network adb mode is reset when the phone restarts, so plug it in and press **Go wireless** again after a reboot. Turn it off or forget phones any time in **Settings**.
+
+**PCs** (Spona on each PC, all signed in to the same Tailscale account)
+- Your other PCs that run Spona show up next to the phones by themselves. There is nothing to type: Spona asks Tailscale on this PC which PCs are yours
+- Click a PC to pick where things go, the same way you pick phones. What you copy (text, an image, or several separate images) and your new screenshots are sent to the selected PCs, ready to paste
+- **Host:** click **This PC** and turn on *Host* to lend this PC's phones to your other PCs. There they show up as *Phone · via PC* and work as if they were plugged in: Capture, Unlock, Lock, Auto-receive and Clipboard sync, each with that PC's own settings. A PC without adb can use them too
+- The host is used first: if a phone can be reached both through a host and directly, it goes through the host, so nothing runs twice. Turn Host off and the other PCs go back to their own connection
+- Right-click a screenshot and pick **Send to PC**, or right-click a PC to send the selected screenshots there
+- Choose what is sent, or turn it all off, in **This PC** or **Settings → Other PCs**
+- Only PCs on your own Tailscale account can connect, and only over your tailnet. The first time, Windows may ask to let Spona through the firewall: allow it on private networks
 
 **Gallery**
 - Thumbnail strip of everything in the save folder, kept in sync with the disk
@@ -142,6 +151,7 @@ Spona is a thin layer over standard `adb` commands:
 | Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
 | Delete a file another app keeps open | Windows Restart Manager names the app, then Spona closes only that app's handles to the file and moves it to the Recycle Bin |
 | Tailscale | `adb tcpip 5555` once over USB, then `adb connect <tailscale-ip>:5555`; peers come from `tailscale status --json` |
+| PCs | each Spona listens on its Tailscale address (TCP port 47615) and connects to the other PCs of the same account listed by `tailscale status --json`. Messages are small JSON headers, images go as files checked with SHA-1, and each one is sent to a PC once |
 | Clipboard sync | pushes a small helper (`helper/ClipHelper.java`, built to `spona/clip_helper.dex`) to `/data/local/tmp` and runs it with `app_process` as the shell user. It listens for clipboard changes on the phone and sets the text Spona sends, all over one `adb shell` pipe |
 
 > [!NOTE]
@@ -156,10 +166,10 @@ Spona never writes inside its own folder. Everything it stores is local:
 | Settings | `%APPDATA%\Spona\settings.json` |
 | Saved PINs (optional, encrypted with Windows DPAPI for your user) | `%APPDATA%\Spona\vault.json` |
 | Which received shots came from which phone (for PC + phone delete) | `%APPDATA%\Spona\origins.json` |
-| Saved Tailscale phones | `%APPDATA%\Spona\settings.json` |
+| Saved Tailscale phones, PC sharing choices | `%APPDATA%\Spona\settings.json` |
 | Screenshots | `Pictures\Spona`, or the folder you pick |
 
-Spona itself sends nothing anywhere. With Tailscale, adb talks to your phone over your own tailnet. Clipboard sync is off until you turn it on, and copied text only travels between the PC and your own phones through adb.
+Spona itself sends nothing anywhere outside your own devices. With Tailscale, adb talks to your phone over your own tailnet. Clipboard sync is off until you turn it on, and copied text only travels between the PC and your own phones through adb. Sharing with PCs only reaches PCs on your own Tailscale account; turn it off in **Settings → Other PCs**. Files that arrive from another PC for the clipboard are kept in `%TEMP%\Spona\received` and cleaned up after a few hours.
 
 ## Project layout
 
@@ -168,9 +178,11 @@ spona/
 ├── app.py           entry point and single-instance handling
 ├── main_window.py   main window and app logic
 ├── adb.py           adb wrapper: devices, screenshots, screen state, unlock, network mode
-├── tailscale.py     lists phones on your tailnet
+├── tailscale.py     lists phones and PCs on your tailnet
+├── link.py          finds your other PCs with Spona and keeps a connection to each
+├── sharing.py       prepares and stores the images and text sent between PCs
 ├── workers.py       background threads: device monitor, capture, unlock, auto-receive, reconnect, clipboard sync
-├── devices.py       phone chips in the top bar
+├── devices.py       phone and PC chips in the top bar
 ├── viewer.py        image view and fullscreen viewer
 ├── marker.py        marker toolbar
 ├── annotations.py   strokes, undo/redo and rendering of marks

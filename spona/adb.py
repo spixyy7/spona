@@ -98,17 +98,25 @@ class Device:
     locked: bool | None = None
     hardware_serial: str = ""
     also_over: str = ""
+    via: str = ""
+    owner: str = ""
 
     @property
     def ready(self) -> bool:
         return self.state == "device"
 
     @property
+    def remote(self) -> bool:
+        return bool(self.owner)
+
+    @property
     def network(self) -> bool:
-        return ":" in self.serial
+        return ":" in self.serial and not self.owner
 
     @property
     def transport(self) -> str:
+        if self.owner:
+            return f"via {self.via}"
         if not self.network:
             return "USB"
         return "Tailscale" if is_tailscale_ip(self.serial.rsplit(":", 1)[0]) else "Wi-Fi"

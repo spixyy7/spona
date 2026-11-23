@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spona"
-version = "0.3.0"
+version = "0.4.0"
 description = "Screenshots from one or more Android phones in one click. A small, fast desktop GUI over adb."
 readme = "README.md"
 license = "MIT"
