@@ -41,6 +41,8 @@ class Glyph:
     PC = "\ue7f4"
     HOST = "\ue704"
     SEND = "\ue724"
+    KEYBOARD = "\ue765"
+    RESET = "\ue72c"
 
 
 _icon_family: list[str] = []

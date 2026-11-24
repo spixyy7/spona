@@ -276,6 +276,21 @@ class Gallery(QListWidget):
         if added:
             self.contents_changed.emit()
 
+    def select_paths(self, paths: list[str]) -> bool:
+        items = [self._items[path] for path in paths if path in self._items]
+        if not items:
+            return False
+        self.blockSignals(True)
+        self.clearSelection()
+        for item in items:
+            item.setSelected(True)
+        self.setCurrentItem(items[0], QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.blockSignals(False)
+        self._scroll_to(items[0])
+        self.viewport().update()
+        self.selection_changed.emit(self.selected_paths())
+        return True
+
     def hide_paths(self, paths: list[str]) -> None:
         normalized = [os.path.normpath(path) for path in paths]
         self._hidden.update(normalized)

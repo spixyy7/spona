@@ -66,6 +66,7 @@ You can also connect a phone that is already listening by typing its Tailscale a
   - Shots go in the order they were taken, and marks you drew are included
 - Delete with a quick prompt: **PC only** or **PC + phone** (for shots that came in with Auto-receive). Tick *Remember my choice* and it stops asking; change it any time in **Settings**. With PC + phone, each shot is deleted wherever it is, and Spona tells you where
 - Delete always works: if another app (OneDrive, an image viewer) keeps the file open, Spona frees it and deletes it anyway. If that is not possible, the shot is hidden and deleted as soon as the file is free, even after a restart
+- **Undo:** press <kbd>Ctrl</kbd>+<kbd>Z</kbd>, the Undo button, or **Undo** in the message after a delete. Deleted shots come back from the Recycle Bin to where they were, with the marks you drew. If they were deleted from the phone too, they go back on the phone as well. It also undoes strokes and saved marks, one step at a time
 - Show the file in Explorer, change the save folder (your choice is remembered)
 
 **Marker**
@@ -107,6 +108,8 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 
 ## Keyboard shortcuts
 
+Every key below can be changed in **Settings → Keyboard shortcuts…**: click a key and press the new one. An action can have several keys, and if the new key was already used for something else, Spona moves it and tells you. Only <kbd>Esc</kbd> is fixed.
+
 | Keys | Action |
 | --- | --- |
 | <kbd>F5</kbd> or <kbd>Space</kbd> | Capture the selected phones |
@@ -114,11 +117,12 @@ The first time you capture, Spona asks where to save screenshots and remembers y
 | <kbd>M</kbd> | Marker (opens fullscreen in drawing mode) |
 | <kbd>F11</kbd>, <kbd>F</kbd>, <kbd>Enter</kbd> or double-click | Toggle fullscreen |
 | <kbd>Esc</kbd> | Leave fullscreen |
-| <kbd>←</kbd> <kbd>→</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
+| <kbd>←</kbd> <kbd>→</kbd> <kbd>Page Up</kbd> <kbd>Page Down</kbd> <kbd>Home</kbd> <kbd>End</kbd>, mouse wheel | Browse screenshots |
 | <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select all screenshots (again to clear) |
 | <kbd>Esc</kbd> | Stop selecting |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy (several shots: grid, side by side or separate, as chosen) |
 | <kbd>Delete</kbd> | Delete (asks PC only or PC + phone) |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open the screenshots folder |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Change the save folder |
 
@@ -149,6 +153,7 @@ Spona is a thin layer over standard `adb` commands:
 | Unlock | `wm dismiss-keyguard`, then `input text` with the PIN |
 | Auto-receive | watches the phone's `Pictures/Screenshots` and `DCIM/Screenshots` folders and pulls new files with `exec-out cat` |
 | Delete on the phone (Move to PC, PC + phone delete) | `content delete` on MediaStore, then `rm` |
+| Undo a delete | moves the file back out of the Recycle Bin; on the phone `adb push` and a media scan, so it shows in the gallery right away |
 | Delete a file another app keeps open | Windows Restart Manager names the app, then Spona closes only that app's handles to the file and moves it to the Recycle Bin |
 | Tailscale | `adb tcpip 5555` once over USB, then `adb connect <tailscale-ip>:5555`; peers come from `tailscale status --json` |
 | PCs | each Spona listens on its Tailscale address (TCP port 47615) and connects to the other PCs of the same account listed by `tailscale status --json`. Messages are small JSON headers, images go as files checked with SHA-1, and each one is sent to a PC once |
@@ -166,7 +171,8 @@ Spona never writes inside its own folder. Everything it stores is local:
 | Settings | `%APPDATA%\Spona\settings.json` |
 | Saved PINs (optional, encrypted with Windows DPAPI for your user) | `%APPDATA%\Spona\vault.json` |
 | Which received shots came from which phone (for PC + phone delete) | `%APPDATA%\Spona\origins.json` |
-| Saved Tailscale phones, PC sharing choices | `%APPDATA%\Spona\settings.json` |
+| Saved Tailscale phones, PC sharing choices, changed shortcuts | `%APPDATA%\Spona\settings.json` |
+| Copies for undo, only for drives without a Recycle Bin, removed when Spona closes | `%TEMP%\Spona\undo` |
 | Screenshots | `Pictures\Spona`, or the folder you pick |
 
 Spona itself sends nothing anywhere outside your own devices. With Tailscale, adb talks to your phone over your own tailnet. Clipboard sync is off until you turn it on, and copied text only travels between the PC and your own phones through adb. Sharing with PCs only reaches PCs on your own Tailscale account; turn it off in **Settings → Other PCs**. Files that arrive from another PC for the clipboard are kept in `%TEMP%\Spona\received` and cleaned up after a few hours.
@@ -190,7 +196,9 @@ spona/
 ├── images.py        image loading, caching and clipboard helpers
 ├── collage.py       grid and side-by-side layout for copying several shots
 ├── naming.py        safe, unique file names
-├── dialogs.py       PIN, delete and settings dialogs
+├── dialogs.py       PIN, delete, settings and shortcuts dialogs
+├── keybinds.py      keyboard shortcuts and their changes
+├── undo.py          undo history and restoring from the Recycle Bin
 ├── origins.py       remembers where received shots live on the phone
 ├── filelocks.py     finds and frees files other apps keep open
 ├── vault.py         encrypted PIN storage

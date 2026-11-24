@@ -72,6 +72,11 @@ QDialog QPushButton#danger {{ background: transparent; border: 1px solid {DANGER
 QDialog QPushButton#danger:hover {{ background: rgba(239, 91, 91, 30); }}
 QDialog QPushButton#danger:disabled {{ border-color: #3a3d44; color: #55585f; }}
 QDialog QPushButton:focus {{ outline: none; }}
+QDialog QPushButton#key {{ background: {BACKGROUND}; border: 1px solid {BORDER}; border-radius: 6px; padding: 3px 9px; color: {TEXT}; }}
+QDialog QPushButton#key:hover {{ border-color: {ACCENT}; }}
+QDialog QPushButton#key:focus {{ border-color: #4a4e56; }}
+QDialog QPushButton#key[recording="true"] {{ border-color: {ACCENT}; color: {ACCENT}; background: {ACCENT_TINT}; }}
+QDialog QPushButton#key[empty="true"] {{ color: {MUTED}; }}
 QLabel#section {{ color: {TEXT}; font-weight: 600; }}
 QLabel#status {{ color: {MUTED}; padding: 8px 10px; border-radius: 8px; background: {BACKGROUND}; }}
 QLabel#status[kind="ok"] {{ color: {ACCENT}; }}

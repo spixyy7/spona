@@ -1,7 +1,7 @@
 import math
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .annotations import (
@@ -16,6 +16,7 @@ from .annotations import (
 )
 from .icons import Glyph, glyph_pixmap
 from .images import rounded
+from .keybinds import MAIN, Keybinds
 from .marker import MarkerPanel
 from .theme import BACKGROUND, MUTED
 from .widgets import Toast, separator, tool_button
@@ -509,15 +510,18 @@ class FullscreenViewer(QWidget):
     capture_requested = Signal()
     delete_requested = Signal()
     copy_requested = Signal()
+    undo_requested = Signal()
+    action_requested = Signal(str)
     save_marks_requested = Signal()
     brush_changed = Signal(dict)
     annotation_changed = Signal(str)
 
-    def __init__(self, brush: Brush, store: AnnotationStore, parent=None):
+    def __init__(self, brush: Brush, store: AnnotationStore, keys: Keybinds, parent=None):
         super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("Spona")
         self._brush = brush
+        self._keys = keys
         self.view = ImageView(self, framed=False, background="#050506")
         self.view.store = store
         self.view.setMouseTracking(True)
@@ -539,21 +543,32 @@ class FullscreenViewer(QWidget):
         bar.setSpacing(2)
         self._counter = QLabel()
         self._counter.setObjectName("counter")
-        self._marker_button = tool_button(Glyph.PEN, "Marker: draw on the image (M)", self.toggle_marker, text="Marker")
+        self._marker_button = tool_button(
+            Glyph.PEN, f"Marker: draw on the image{keys.hint('marker')}", self.toggle_marker, text="Marker"
+        )
         self._marker_button.setCheckable(True)
-        bar.addWidget(tool_button(Glyph.PREVIOUS, "Previous (←)", lambda: self.navigate.emit(-1), icon_size=16))
+        bar.addWidget(
+            tool_button(
+                Glyph.PREVIOUS, f"Previous{keys.hint('previous')}", lambda: self.navigate.emit(-1), icon_size=16
+            )
+        )
         bar.addWidget(self._counter)
-        bar.addWidget(tool_button(Glyph.NEXT, "Next (→)", lambda: self.navigate.emit(1), icon_size=16))
+        bar.addWidget(
+            tool_button(Glyph.NEXT, f"Next{keys.hint('next')}", lambda: self.navigate.emit(1), icon_size=16)
+        )
         bar.addWidget(separator())
         bar.addWidget(self._marker_button)
-        bar.addWidget(tool_button(Glyph.CAMERA, "Capture (F5 or Space)", self.capture_requested.emit))
-        bar.addWidget(tool_button(Glyph.COPY, "Copy (Ctrl+C)", self.copy_requested.emit))
-        bar.addWidget(tool_button(Glyph.DELETE, "Delete image (Delete)", self.delete_requested.emit))
+        bar.addWidget(
+            tool_button(Glyph.CAMERA, f"Capture{keys.hint('capture', every=True)}", self.capture_requested.emit)
+        )
+        bar.addWidget(tool_button(Glyph.COPY, f"Copy{keys.hint('copy')}", self.copy_requested.emit))
+        bar.addWidget(tool_button(Glyph.DELETE, f"Delete image{keys.hint('delete')}", self.delete_requested.emit))
+        bar.addWidget(tool_button(Glyph.UNDO, f"Undo{keys.hint('undo')}", self.undo_requested.emit))
         bar.addWidget(separator())
         bar.addWidget(tool_button(Glyph.EXIT_FULLSCREEN, "Exit fullscreen (Esc)", self.close_animated))
         self._overlay_fade = FadingPanel(self._overlay, self, 220)
 
-        self._marker = MarkerPanel(brush, self.view)
+        self._marker = MarkerPanel(brush, keys, self.view)
         self._marker.changed.connect(self._on_brush_changed)
         self._marker.undo_requested.connect(self.undo)
         self._marker.redo_requested.connect(self.redo)
@@ -617,6 +632,8 @@ class FullscreenViewer(QWidget):
         key = self.view.current_key()
         if key and self.view.store.undo(key):
             self._on_annotation_changed(key)
+        else:
+            self.toast.show_message("No marks to undo here")
 
     def redo(self) -> None:
         key = self.view.current_key()
@@ -627,7 +644,8 @@ class FullscreenViewer(QWidget):
         key = self.view.current_key()
         if key and self.view.store.clear(key):
             self._on_annotation_changed(key)
-            self.toast.show_message("Marks cleared  ·  Ctrl+Z brings them back")
+            back = self._keys.text("undo") or "Undo"
+            self.toast.show_message(f"Marks cleared  ·  {back} brings them back")
 
     def refresh(self) -> None:
         self.view.update()
@@ -699,48 +717,45 @@ class FullscreenViewer(QWidget):
         return False
 
     def keyPressEvent(self, event):
-        key = event.key()
-        control = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         drawing = self.view.drawing()
-        if key == Qt.Key.Key_M and not control:
-            self.toggle_marker()
-        elif drawing and key == Qt.Key.Key_Escape:
-            self.toggle_marker()
-        elif drawing and control and key == Qt.Key.Key_Z and shift:
-            self.redo()
-        elif drawing and control and key == Qt.Key.Key_Z:
-            self.undo()
-        elif drawing and control and key == Qt.Key.Key_Y:
-            self.redo()
-        elif drawing and control and key == Qt.Key.Key_S:
-            self.save_marks_requested.emit()
-        elif drawing and key == Qt.Key.Key_Delete:
-            self.clear_marks()
-        elif drawing and key == Qt.Key.Key_P:
-            self._marker.set_tool("pen")
-        elif drawing and key == Qt.Key.Key_E:
-            self._marker.set_tool("eraser")
-        elif drawing and key == Qt.Key.Key_BracketLeft:
-            self._marker.resize_brush(-1)
-        elif drawing and key == Qt.Key.Key_BracketRight:
-            self._marker.resize_brush(1)
-        elif drawing and int(Qt.Key.Key_1) <= key <= int(Qt.Key.Key_6):
-            self._marker.set_color(MARKER_COLORS[key - int(Qt.Key.Key_1)])
-        elif key in (Qt.Key.Key_Escape, Qt.Key.Key_F11, Qt.Key.Key_F, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.close_animated()
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp):
-            self.navigate.emit(-1)
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown):
-            self.navigate.emit(1)
-        elif key in (Qt.Key.Key_F5, Qt.Key.Key_Space):
-            self.capture_requested.emit()
-        elif key == Qt.Key.Key_Delete:
-            self.delete_requested.emit()
-        elif event.matches(QKeySequence.StandardKey.Copy):
-            self.copy_requested.emit()
-        else:
+        if event.key() == Qt.Key.Key_Escape:
+            if drawing:
+                self.toggle_marker()
+            else:
+                self.close_animated()
+            return
+        action = self._keys.match_drawing(event) if drawing else self._keys.match(event, MAIN)
+        if action is None:
             super().keyPressEvent(event)
+            return
+        self._run(action)
+
+    def _run(self, action: str) -> None:
+        if action.startswith("color"):
+            self._marker.set_color(MARKER_COLORS[int(action[-1]) - 1])
+            return
+        handlers = {
+            "marker": self.toggle_marker,
+            "undo": self.undo if self.view.drawing() else self.undo_requested.emit,
+            "redo": self.redo,
+            "save_marks": self.save_marks_requested.emit,
+            "clear_marks": self.clear_marks,
+            "pen": lambda: self._marker.set_tool("pen"),
+            "eraser": lambda: self._marker.set_tool("eraser"),
+            "smaller": lambda: self._marker.resize_brush(-1),
+            "bigger": lambda: self._marker.resize_brush(1),
+            "fullscreen": self.close_animated,
+            "previous": lambda: self.navigate.emit(-1),
+            "next": lambda: self.navigate.emit(1),
+            "capture": self.capture_requested.emit,
+            "delete": self.delete_requested.emit,
+            "copy": self.copy_requested.emit,
+        }
+        handler = handlers.get(action)
+        if handler is not None:
+            handler()
+        else:
+            self.action_requested.emit(action)
 
     def closeEvent(self, event):
         self.closed.emit()

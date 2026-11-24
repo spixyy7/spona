@@ -176,6 +176,7 @@ class PhoneScreenshotWatcher(QThread):
         self._targets: dict[str, tuple[Path, bool]] = {}
         self._stopping = threading.Event()
         self._wakeup = threading.Event()
+        self._skip: set[str] = set()
         self._since: dict[str, int] = {}
         self._seen: dict[str, set[str]] = {}
         self._pending: dict[str, dict[str, int]] = {}
@@ -184,6 +185,10 @@ class PhoneScreenshotWatcher(QThread):
         with self._lock:
             self._targets = dict(targets)
         self._wakeup.set()
+
+    def skip(self, remote_paths: list[str]) -> None:
+        with self._lock:
+            self._skip.update(remote_paths)
 
     def run(self):
         while not self._stopping.is_set():
@@ -216,8 +221,10 @@ class PhoneScreenshotWatcher(QThread):
         since = self._since[serial]
         seen = self._seen[serial]
         pending = self._pending[serial]
+        with self._lock:
+            skip = set(self._skip)
         for path, size, modified in sorted(entries, key=lambda entry: entry[2]):
-            if path in seen or modified < since or size <= 0:
+            if path in seen or path in skip or modified < since or size <= 0:
                 continue
             if pending.get(path) != size:
                 time.sleep(0.25)
@@ -322,6 +329,24 @@ class PhoneDeleteTask(QRunnable):
             self._signals.failed.emit(self._batch, self._serial, str(error))
             return
         self._signals.finished.emit(self._batch, self._serial, removed, len(self._remote_paths))
+
+
+class PhoneRestoreTask(QRunnable):
+    def __init__(self, number: int, adb: Adb, serial: str, items: list[tuple[str, str]], signals: DeleteSignals):
+        super().__init__()
+        self._number = number
+        self._adb = adb
+        self._serial = serial
+        self._items = list(items)
+        self._signals = signals
+
+    def run(self):
+        try:
+            restored = self._adb.restore_files(self._serial, self._items)
+        except AdbError as error:
+            self._signals.failed.emit(self._number, self._serial, str(error))
+            return
+        self._signals.finished.emit(self._number, self._serial, restored, len(self._items))
 
 
 class NetworkSignals(QObject):

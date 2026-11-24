@@ -112,6 +112,11 @@ class AnnotationStore:
         self._strokes: dict[str, list[Stroke]] = {}
         self._undo: dict[str, list[list[Stroke]]] = {}
         self._redo: dict[str, list[list[Stroke]]] = {}
+        self.listener = None
+
+    def _tell(self, event: str, key: str) -> None:
+        if self.listener is not None:
+            self.listener(event, key)
 
     def strokes(self, key: str) -> list[Stroke]:
         return self._strokes.get(key, [])
@@ -129,6 +134,7 @@ class AnnotationStore:
         self._undo.setdefault(key, []).append(list(self.strokes(key) if previous is None else previous))
         self._redo[key] = []
         self._strokes[key] = list(strokes)
+        self._tell("commit", key)
 
     def set_silently(self, key: str, strokes: list[Stroke]) -> None:
         self._strokes[key] = list(strokes)
@@ -142,12 +148,14 @@ class AnnotationStore:
         self.commit(key, [])
         return True
 
-    def undo(self, key: str) -> bool:
+    def undo(self, key: str, silent: bool = False) -> bool:
         stack = self._undo.get(key)
         if not stack:
             return False
         self._redo.setdefault(key, []).append(self.strokes(key))
         self._strokes[key] = stack.pop()
+        if not silent:
+            self._tell("undo", key)
         return True
 
     def redo(self, key: str) -> bool:
@@ -156,7 +164,24 @@ class AnnotationStore:
             return False
         self._undo.setdefault(key, []).append(self.strokes(key))
         self._strokes[key] = stack.pop()
+        self._tell("redo", key)
         return True
+
+    def snapshot(self, key: str) -> tuple | None:
+        if not (self.has(key) or self.can_undo(key) or self.can_redo(key)):
+            return None
+        return tuple(self.strokes(key)), list(self._undo.get(key, [])), list(self._redo.get(key, []))
+
+    def restore(self, key: str, state: tuple | None) -> None:
+        if state is None:
+            return
+        strokes, undo, redo = state
+        if self.has(key):
+            self.commit(key, list(strokes) + self.strokes(key))
+            return
+        self._strokes[key] = list(strokes)
+        self._undo[key] = list(undo)
+        self._redo[key] = list(redo)
 
     def forget(self, key: str) -> None:
         self._strokes.pop(key, None)

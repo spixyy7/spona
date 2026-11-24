@@ -1,7 +1,10 @@
+import html
+
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation, QSize, Qt, QTimer
 from PySide6.QtWidgets import QAbstractButton, QFrame, QGraphicsOpacityEffect, QLabel, QSizePolicy, QToolButton, QWidget
 
 from .icons import glyph_icon
+from .theme import ACCENT
 
 
 def tool_button(glyph: str, tooltip: str, slot, text: str | None = None, icon_size: int = 18) -> QToolButton:
@@ -179,21 +182,57 @@ class Toast(QLabel):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(lambda: self._fade_to(0.0))
+        self._callback = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.linkActivated.connect(self._run_action)
         host.installEventFilter(self)
         self.hide()
 
-    def show_message(self, text: str, kind: str = "info", duration: int = 2000) -> None:
+    def show_message(self, text: str, kind: str = "info", duration: int = 2000, action=None) -> None:
         self.setProperty("kind", kind)
         self.style().unpolish(self)
         self.style().polish(self)
         self.setMaximumWidth(max(160, self.parentWidget().width() - 40))
-        self.setText(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.maximumWidth() - 40))
+        room = self.maximumWidth() - 40
+        self._callback = action[1] if action is not None else None
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, action is None)
+        if action is None:
+            self.setTextFormat(Qt.TextFormat.PlainText)
+            self.setText(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, room))
+        else:
+            label = action[0]
+            room -= round(self.fontMetrics().horizontalAdvance(label) * 1.15) + 24
+            plain = html.escape(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, max(60, room)))
+            self.setTextFormat(Qt.TextFormat.RichText)
+            self.setText(
+                plain.replace("  ", "&nbsp; ")
+                + f'&nbsp; &nbsp; <a href="action" style="color:{ACCENT}; text-decoration:none; font-weight:600">'
+                + html.escape(label).replace(" ", "&nbsp;")
+                + "</a>"
+            )
         self.adjustSize()
         self._place()
         self.show()
         self.raise_()
         self._fade_to(1.0)
         self._timer.start(duration)
+
+    def _run_action(self, _link: str = "") -> None:
+        callback, self._callback = self._callback, None
+        if callback is not None:
+            self._timer.stop()
+            self._fade_to(0.0)
+            callback()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if self._callback is not None:
+            self._timer.stop()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if self._callback is not None and self.isVisible():
+            self._timer.start(1500)
 
     def _fade_to(self, value: float) -> None:
         self._animation.stop()

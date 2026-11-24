@@ -10,14 +10,24 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QFile, QSize, QStandardPaths, Qt, QThreadPool, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QSize, QStandardPaths, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QActionGroup, QDesktopServices, QDrag, QGuiApplication, QImageReader, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from . import __version__
 from .adb import Adb, Device, UnlockOutcome, find_adb, normalize_address
 from .devices import DeviceBar, state_text
-from .dialogs import CLIPBOARD_MODES, PC_DEFAULTS, PHONE_SHOT_MODES, DeleteDialog, NetworkDialog, SecretDialog, SettingsDialog
+from .dialogs import (
+    CLIPBOARD_MODES,
+    PC_DEFAULTS,
+    PHONE_SHOT_MODES,
+    DeleteDialog,
+    NetworkDialog,
+    SecretDialog,
+    SettingsDialog,
+    ShortcutsDialog,
+)
+from .keybinds import PORTABLE, Keybinds
 from .link import MAX_PAYLOAD, Link
 from .sharing import FILE_LIMIT, TEXT_LIMIT, Blobs, PrepareSignals, PrepareTask, clipboard_payload, digest, inside, tidy_folder
 from .origins import PhoneOrigins
@@ -34,6 +44,17 @@ from .viewer import FullscreenViewer, ImageView
 from .widgets import ElidedLabel, ResponsiveBar, Toast, separator, tool_button
 from .filelocks import locking_processes, release_file
 from .tailscale import find_tailscale, tailscale_peers
+from .undo import (
+    DeleteAction,
+    DeletedShot,
+    History,
+    MarkAction,
+    SaveAction,
+    clear_copies,
+    keep_copy,
+    put_back,
+    recycle,
+)
 from .workers import (
     CallTask,
     CaptureSignals,
@@ -50,6 +71,7 @@ from .workers import (
     JobSignals,
     JobTask,
     PhoneDeleteTask,
+    PhoneRestoreTask,
     PhoneScreenshotWatcher,
     ScreenSignals,
     ShotSignals,
@@ -149,13 +171,6 @@ def clipboard_text(mime) -> str:
     return text if text.strip() else ""
 
 
-def move_to_trash(path: str) -> bool:
-    result = QFile.moveToTrash(path)
-    if isinstance(result, tuple):
-        return bool(result[0])
-    return bool(result)
-
-
 def remove_for_good(path: str) -> bool:
     try:
         os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
@@ -187,6 +202,20 @@ class DeleteReport:
         self.phone_missed = 0
         self.phone_names: list[str] = []
         self.phone_errors: list[str] = []
+        self.action: DeleteAction | None = None
+        self.restore = None
+
+
+class RestoreReport:
+    def __init__(self, number: int, text: str, extra: str):
+        self.number = number
+        self.text = text
+        self.extra = extra
+        self.waiting: set[str] = set()
+        self.names: list[str] = []
+        self.errors: list[str] = []
+        self.restored = 0
+        self.offline = 0
 
 
 def delete_summary(report: DeleteReport) -> tuple[str, str]:
@@ -205,10 +234,8 @@ def delete_summary(report: DeleteReport) -> tuple[str, str]:
         parts.append(f"Deleted on PC and {names}")
         kind = "ok"
     elif on_pc == count and not report.also_phone:
-        parts.append(
-            "Deleted  ·  moved to the Recycle Bin" if count == 1
-            else f"Deleted {count} {images_word(count)}  ·  moved to the Recycle Bin"
-        )
+        text = "Deleted" if count == 1 else f"Deleted {count} {images_word(count)}"
+        parts.append(text if outcome.forever else f"{text}  ·  moved to the Recycle Bin")
     elif on_pc == count:
         parts.append("Deleted on PC" if count == 1 else f"Deleted {count} on PC")
     elif on_pc:
@@ -218,7 +245,7 @@ def delete_summary(report: DeleteReport) -> tuple[str, str]:
         stuck = "" if count == 1 else f"{len(outcome.stuck)} "
         parts.append(f"{stuck}in use by {holder}, deleted on PC once it's free")
     if outcome.forever:
-        parts.append("no Recycle Bin there, deleted for good")
+        parts.append("no Recycle Bin there, undo works until Spona closes")
     if report.also_phone and not everywhere:
         if not report.on_phone:
             parts.append("wasn't on the phone" if count == 1 else "weren't on the phone")
@@ -298,6 +325,18 @@ class MainWindow(QMainWindow):
         self._secret_queue: list[str] = []
         self._asking_secret = False
         self._annotations = AnnotationStore()
+        self._annotations.listener = self._on_mark_event
+        self._keys = Keybinds(settings, self)
+        self._keys.changed.connect(self._on_keys_changed)
+        self._shortcuts: list[QShortcut] = []
+        self._history = History(parent=self)
+        self._history.changed.connect(self._show_undo)
+        self._trashed: dict[str, str] = {}
+        self._restore_signals = DeleteSignals(self)
+        self._restore_signals.finished.connect(self._on_phone_restored)
+        self._restore_signals.failed.connect(self._on_phone_restore_failed)
+        self._restore_counter = 0
+        self._restores: dict[int, RestoreReport] = {}
         self._brush = Brush.from_dict(settings.get("marker"))
         self._receiver: PhoneScreenshotWatcher | None = None
         self._origins = PhoneOrigins()
@@ -394,6 +433,7 @@ class MainWindow(QMainWindow):
         self._show_delete_mode()
         self._start_adb()
         tidy_folder(RELAY_FOLDER)
+        clear_copies()
         if self._pc["pc_sharing"]:
             self._link.start()
         self._refresh_devices()
@@ -429,9 +469,7 @@ class MainWindow(QMainWindow):
         self._adb_button.hide()
         self._path_button = tool_button(Glyph.FOLDER, "", self.open_folder, text=" ")
         self._path_button.setObjectName("path")
-        self._change_button = tool_button(
-            Glyph.MOVE_TO_FOLDER, "Change where screenshots are saved (Ctrl+L)", self.change_folder, text="Change"
-        )
+        self._change_button = tool_button(Glyph.MOVE_TO_FOLDER, "", self.change_folder, text="Change")
         top_layout.addWidget(self._device_bar, 1)
         top_layout.addWidget(self._adb_button)
         top_layout.addWidget(self._path_button)
@@ -463,14 +501,8 @@ class MainWindow(QMainWindow):
         self._capture_button.setIconSize(QSize(18, 18))
         self._capture_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._capture_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._capture_button.setToolTip("Take a screenshot of the selected phones (F5 or Space)")
         self._capture_button.clicked.connect(self.capture)
-        self._unlock_button = tool_button(
-            Glyph.UNLOCK,
-            "Unlock the selected phones (Ctrl+U)\nWakes the screen, opens the PIN pad and types the saved PIN",
-            self.unlock_selected,
-            text="Unlock",
-        )
+        self._unlock_button = tool_button(Glyph.UNLOCK, "", self.unlock_selected, text="Unlock")
         self._receive_button = tool_button(Glyph.DOWNLOAD, "", self._toggle_auto_receive, text="Auto-receive")
         self._receive_button.setCheckable(True)
         self._receive_mode_button = tool_button(
@@ -508,22 +540,9 @@ class MainWindow(QMainWindow):
         self._auto_copy_button.setChecked(bool(self._settings.get("auto_copy", False)))
         self._info_label = ElidedLabel()
         self._info_label.setObjectName("muted")
-        self._select_button = tool_button(
-            Glyph.MULTISELECT,
-            "\n".join(
-                (
-                    "Select several screenshots",
-                    "Click or swipe over thumbnails, then press Delete",
-                    "Ctrl+A selects all, Esc stops",
-                )
-            ),
-            self._toggle_select_mode,
-            text="Select",
-        )
+        self._select_button = tool_button(Glyph.MULTISELECT, "", self._toggle_select_mode, text="Select")
         self._select_button.setCheckable(True)
-        self._select_all_button = tool_button(
-            Glyph.SELECT_ALL, "Select every screenshot in the folder (Ctrl+A)", self.select_all_or_clear, text="Select all"
-        )
+        self._select_all_button = tool_button(Glyph.SELECT_ALL, "", self.select_all_or_clear, text="Select all")
         self._select_all_button.hide()
         self._copy_button = tool_button(Glyph.COPY, "", self.copy_selected)
         self._copy_mode_button = tool_button(Glyph.CHEVRON_DOWN, "How several images are copied", lambda: None, icon_size=12)
@@ -546,14 +565,11 @@ class MainWindow(QMainWindow):
         copy_layout.addWidget(self._copy_button)
         copy_layout.addWidget(self._copy_mode_button)
         self._show_copy_layout()
-        self._delete_button = tool_button(
-            Glyph.DELETE, "Delete selected images (Delete), they go to the Recycle Bin", self.delete_selected
-        )
-        self._marker_button = tool_button(
-            Glyph.PEN, "Marker: draw on the image in fullscreen (M)", self.open_marker
-        )
-        self._fullscreen_button = tool_button(Glyph.FULLSCREEN, "Fullscreen (F11 or double-click)", self.toggle_fullscreen)
-        self._open_button = tool_button(Glyph.FOLDER_OPEN, "Open the screenshots folder (Ctrl+O)", self.open_folder)
+        self._delete_button = tool_button(Glyph.DELETE, "", self.delete_selected)
+        self._undo_button = tool_button(Glyph.UNDO, "", self.undo)
+        self._marker_button = tool_button(Glyph.PEN, "", self.open_marker)
+        self._fullscreen_button = tool_button(Glyph.FULLSCREEN, "", self.toggle_fullscreen)
+        self._open_button = tool_button(Glyph.FOLDER_OPEN, "", self.open_folder)
         bottom_layout.addWidget(self._capture_button)
         bottom_layout.addWidget(self._unlock_button)
         bottom_layout.addWidget(receive_box)
@@ -569,6 +585,7 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(select_box)
         bottom_layout.addWidget(copy_box)
         bottom_layout.addWidget(self._delete_button)
+        bottom_layout.addWidget(self._undo_button)
         bottom_layout.addWidget(self._marker_button)
         bottom_layout.addWidget(self._fullscreen_button)
         bottom_layout.addWidget(separator())
@@ -589,28 +606,81 @@ class MainWindow(QMainWindow):
             {self._info_label: [150, 110, 80, 0]},
         )
         self._top_fit = ResponsiveBar(top, [[self._path_button, self._adb_button], [self._change_button]])
+        self._show_key_tips()
+
+    def _key_handlers(self) -> dict:
+        return {
+            "capture": self.capture,
+            "undo": self.undo,
+            "copy": self.copy_selected,
+            "delete": self.delete_selected,
+            "select_all": self.select_all_or_clear,
+            "marker": self.open_marker,
+            "fullscreen": self.toggle_fullscreen,
+            "unlock": self.unlock_selected,
+            "previous": lambda: self._step(-1),
+            "next": lambda: self._step(1),
+            "first": lambda: self._gallery.go(0),
+            "last": lambda: self._gallery.go(-1),
+            "open_folder": self.open_folder,
+            "change_folder": self.change_folder,
+        }
 
     def _bind_shortcuts(self) -> None:
-        bindings = [
-            (("F5", "Space"), self.capture),
-            (("F11", "F", "Return", "Enter"), self.toggle_fullscreen),
-            (("Delete",), self.delete_selected),
-            (("Ctrl+C",), self.copy_selected),
-            (("Ctrl+O",), self.open_folder),
-            (("Ctrl+L",), self.change_folder),
-            (("Ctrl+U",), self.unlock_selected),
-            (("M",), self.open_marker),
-            (("Ctrl+A",), self.select_all_or_clear),
-            (("Escape",), self._leave_selection),
-            (("Left", "Up"), lambda: self._step(-1)),
-            (("Right", "Down"), lambda: self._step(1)),
-            (("Home",), lambda: self._gallery.go(0)),
-            (("End",), lambda: self._gallery.go(-1)),
-        ]
-        for keys, handler in bindings:
-            for key in keys:
-                shortcut = QShortcut(QKeySequence(key), self)
-                shortcut.activated.connect(handler)
+        for shortcut in self._shortcuts:
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self._shortcuts = []
+        bindings = [("Esc", self._leave_selection)]
+        for identity, handler in self._key_handlers().items():
+            for key in self._keys.keys(identity):
+                bindings.append((key, handler))
+                if key == "Return" or key.endswith("+Return"):
+                    bindings.append((key[: -len("Return")] + "Enter", handler))
+        for key, handler in bindings:
+            shortcut = QShortcut(QKeySequence(key, PORTABLE), self)
+            shortcut.activated.connect(handler)
+            self._shortcuts.append(shortcut)
+
+    def _on_keys_changed(self) -> None:
+        self._bind_shortcuts()
+        self._show_key_tips()
+
+    def _show_key_tips(self) -> None:
+        keys = self._keys
+        self._change_button.setToolTip(f"Change where screenshots are saved{keys.hint('change_folder')}")
+        self._capture_button.setToolTip(
+            f"Take a screenshot of the selected phones{keys.hint('capture', every=True)}"
+        )
+        self._unlock_button.setToolTip(
+            f"Unlock the selected phones{keys.hint('unlock')}\n"
+            "Wakes the screen, opens the PIN pad and types the saved PIN"
+        )
+        select_all = keys.text("select_all")
+        self._select_button.setToolTip(
+            "\n".join(
+                (
+                    "Select several screenshots",
+                    f"Click or swipe over thumbnails, then press {keys.text('delete') or 'Delete'}",
+                    f"{select_all} selects all, Esc stops" if select_all else "Esc stops",
+                )
+            )
+        )
+        self._marker_button.setToolTip(f"Marker: draw on the image in fullscreen{keys.hint('marker')}")
+        ways = " or ".join(part for part in (keys.text("fullscreen"), "double-click") if part)
+        self._fullscreen_button.setToolTip(f"Fullscreen ({ways})")
+        self._open_button.setToolTip(f"Open the screenshots folder{keys.hint('open_folder')}")
+        self._update_select_all_button()
+        self._update_folder_button()
+        self._show_copy_layout()
+        self._show_delete_mode()
+        self._show_undo()
+
+    def _show_undo(self) -> None:
+        action = self._history.peek()
+        self._undo_button.setEnabled(action is not None)
+        label = action.label if action is not None else "Nothing to undo"
+        self._undo_button.setToolTip(f"{label}{self._keys.hint('undo')}")
 
     def _start_adb(self, preferred: str | None = None) -> None:
         self._stop_workers()
@@ -1307,11 +1377,12 @@ class MainWindow(QMainWindow):
         count = len(paths)
         menu = QMenu(self._fullscreen or self)
         if count == 1:
-            menu.addAction(glyph_icon(Glyph.COPY, size=16), "Copy image  (Ctrl+C)", lambda: self.copy_paths(paths))
+            copy_text = f"Copy image{self._keys.hint('copy', gap='  ')}"
+            menu.addAction(glyph_icon(Glyph.COPY, size=16), copy_text, lambda: self.copy_paths(paths))
         else:
             menu.addAction(
                 glyph_icon(COPY_GLYPHS[self._copy_layout], size=16),
-                f"Copy {count} images  ·  {LAYOUT_NAMES[self._copy_layout]}  (Ctrl+C)",
+                f"Copy {count} images  ·  {LAYOUT_NAMES[self._copy_layout]}{self._keys.hint('copy', gap='  ')}",
                 lambda: self.copy_paths(paths),
             )
             for mode in COPY_LAYOUT_KEYS:
@@ -1340,10 +1411,16 @@ class MainWindow(QMainWindow):
                 send_menu.addAction("All my PCs", lambda: self._send_images(paths, [peer.id for peer in peers]))
         menu.addAction(glyph_icon(Glyph.FOLDER_OPEN, size=16), "Show in folder", lambda: self._reveal(paths[0]))
         if self._gallery.count() > 1 and not self._all_selected():
-            menu.addAction(glyph_icon(Glyph.SELECT_ALL, size=16), "Select all  (Ctrl+A)", self.select_all_or_clear)
+            select_text = f"Select all{self._keys.hint('select_all', gap='  ')}"
+            menu.addAction(glyph_icon(Glyph.SELECT_ALL, size=16), select_text, self.select_all_or_clear)
         if self._fullscreen is None:
-            menu.addAction(glyph_icon(Glyph.FULLSCREEN, size=16), "Fullscreen  (F11)", self.toggle_fullscreen)
+            fullscreen_text = f"Fullscreen{self._keys.hint('fullscreen', gap='  ')}"
+            menu.addAction(glyph_icon(Glyph.FULLSCREEN, size=16), fullscreen_text, self.toggle_fullscreen)
         menu.addSeparator()
+        undoable = self._history.peek()
+        if undoable is not None:
+            undo_text = f"{undoable.label}{self._keys.hint('undo', gap='  ')}"
+            menu.addAction(glyph_icon(Glyph.UNDO, size=16), undo_text, self.undo)
         menu.addAction(
             glyph_icon(Glyph.DELETE, size=16),
             "Delete" if count == 1 else f"Delete {count} {images_word(count)}",
@@ -1384,7 +1461,9 @@ class MainWindow(QMainWindow):
             self._select_all_button.setToolTip("Deselect all screenshots")
         else:
             self._select_all_button.setText("Select all")
-            self._select_all_button.setToolTip("Select every screenshot in the folder (Ctrl+A)")
+            self._select_all_button.setToolTip(
+                f"Select every screenshot in the folder{self._keys.hint('select_all')}"
+            )
 
     def select_all_or_clear(self) -> None:
         if self._all_selected() and self._gallery.selection_mode:
@@ -1399,19 +1478,35 @@ class MainWindow(QMainWindow):
         elif len(self._selected_paths) > 1:
             self._gallery.go(max(0, self._gallery.currentRow()))
 
+    def _recycle(self, path: str) -> bool:
+        done, place = recycle(path)
+        if done and place:
+            self._trashed[path] = place
+        return done
+
+    def _remove_for_good(self, path: str) -> bool:
+        copy = keep_copy(path)
+        if remove_for_good(path):
+            if copy:
+                self._trashed[path] = copy
+            return True
+        if copy:
+            remove_for_good(copy)
+        return False
+
     def _trash(self, paths: list[str]) -> TrashOutcome:
         self._loader.wait_idle(1500)
         outcome = TrashOutcome()
         retry = []
         for path in paths:
-            if not os.path.exists(path) or move_to_trash(path):
+            if not os.path.exists(path) or self._recycle(path):
                 outcome.deleted.append(path)
             else:
                 retry.append(path)
         if retry:
             time.sleep(0.3)
         for path in retry:
-            if not os.path.exists(path) or move_to_trash(path):
+            if not os.path.exists(path) or self._recycle(path):
                 outcome.deleted.append(path)
                 continue
             freed = False
@@ -1420,7 +1515,7 @@ class MainWindow(QMainWindow):
                 for app in apps:
                     if app not in outcome.released:
                         outcome.released.append(app)
-                if apps and (move_to_trash(path) or not os.path.exists(path)):
+                if apps and (self._recycle(path) or not os.path.exists(path)):
                     freed = True
                     break
                 if not apps:
@@ -1428,7 +1523,7 @@ class MainWindow(QMainWindow):
                 time.sleep(0.15)
             if freed:
                 outcome.deleted.append(path)
-            elif not locking_processes(path) and remove_for_good(path):
+            elif not locking_processes(path) and self._remove_for_good(path):
                 outcome.forever.append(path)
             else:
                 outcome.stuck.append(path)
@@ -1444,7 +1539,8 @@ class MainWindow(QMainWindow):
             "both": "PC and phone, set in Settings",
         }
         mode = self._settings.get("delete_mode", "ask")
-        self._delete_button.setToolTip(f"Delete selected (Delete)  ·  {descriptions.get(mode, descriptions['ask'])}")
+        about = descriptions.get(mode, descriptions["ask"])
+        self._delete_button.setToolTip(f"Delete selected{self._keys.hint('delete')}  ·  {about}")
 
     def delete_selected(self) -> None:
         self.delete_paths(self._selected_paths)
@@ -1471,6 +1567,7 @@ class MainWindow(QMainWindow):
             also_phone = mode == "both"
         outcome = self._trash(paths)
         gone = outcome.deleted + outcome.forever + outcome.stuck
+        marks = {path: self._annotations.snapshot(path) for path in gone}
         for path in gone:
             self._loader.forget(path)
             self._annotations.forget(path)
@@ -1482,20 +1579,31 @@ class MainWindow(QMainWindow):
         self._origins.forget(gone + list(phone_jobs))
         self._delete_counter += 1
         report = DeleteReport(self._delete_counter, len(paths), outcome, also_phone, len(phone_jobs))
+        if gone:
+            shots = [
+                DeletedShot(path, self._trashed.pop(path, ""), on_phone.get(path), path in phone_jobs, marks[path])
+                for path in gone
+            ]
+            report.action = DeleteAction(shots, report)
+            self._history.push(report.action)
         if phone_jobs:
             self._delete_on_phones(report, phone_jobs)
         if not report.waiting:
             self._finish_delete(report)
 
-    def _delete_on_phones(self, report: DeleteReport, jobs: dict[str, dict]) -> None:
-        by_serial: dict[str, list[str]] = {}
-        for origin in jobs.values():
-            by_serial.setdefault(origin["serial"], []).append(origin["remote"])
-        live = {}
+    def _live_phones(self) -> dict[str, str]:
+        live: dict[str, str] = {}
         for device in self._local_devices:
             if device.ready:
                 live.setdefault(device.serial, device.serial)
                 live.setdefault(device.identity, device.serial)
+        return live
+
+    def _delete_on_phones(self, report: DeleteReport, jobs: dict[str, dict]) -> None:
+        by_serial: dict[str, list[str]] = {}
+        for origin in jobs.values():
+            by_serial.setdefault(origin["serial"], []).append(origin["remote"])
+        live = self._live_phones()
         for key, remotes in by_serial.items():
             if self._adb is None or key not in live:
                 report.offline += len(remotes)
@@ -1532,8 +1640,187 @@ class MainWindow(QMainWindow):
             self._finish_delete(report)
 
     def _finish_delete(self, report: DeleteReport) -> None:
+        if report.restore is not None:
+            report.restore()
+            return
         text, kind = delete_summary(report)
-        self._notify(text, kind, 2200 if kind != "error" and len(text) < 60 else 4200)
+        if report.action is None:
+            self._notify(text, kind, 2200 if kind != "error" and len(text) < 60 else 4200)
+        else:
+            self._notify(text, kind, 5000, self._undo_link(report.action))
+
+    def _undo_link(self, action) -> tuple:
+        return f"Undo{self._keys.hint('undo')}", lambda: self._undo_shown(action)
+
+    def _undo_shown(self, action) -> None:
+        if self._history.take(action) is not None:
+            self._undo_action(action)
+
+    def undo(self) -> None:
+        if self._fullscreen is not None and self._fullscreen.marker_active():
+            self._fullscreen.undo()
+            return
+        while True:
+            action = self._history.take()
+            if action is None:
+                self._notify("Nothing to undo")
+                return
+            if self._undo_action(action):
+                return
+
+    def _undo_action(self, action) -> bool:
+        if isinstance(action, DeleteAction):
+            return self._undo_delete(action)
+        if isinstance(action, SaveAction):
+            return self._undo_save(action)
+        return self._undo_mark(action)
+
+    def _undo_delete(self, action: DeleteAction) -> bool:
+        restored: list[tuple[DeletedShot, str]] = []
+        for shot in action.shots:
+            if shot.path in self._pending_trash:
+                self._pending_trash.remove(shot.path)
+                restored.append((shot, shot.path))
+                continue
+            try:
+                restored.append((shot, put_back(shot.place or self._trashed.pop(shot.path, ""), shot.path)))
+            except OSError:
+                continue
+        self._settings.set("pending_trash", list(self._pending_trash))
+        if not self._pending_trash:
+            self._pending_timer.stop()
+        lost = len(action.shots) - len(restored)
+        if not restored:
+            text = "it's" if lost == 1 else "they're"
+            self._notify(f"Can't undo  ·  {text} no longer in the Recycle Bin", "error", 4000)
+            return True
+        paths = [path for _shot, path in restored]
+        for shot, path in restored:
+            self._broken.discard(path)
+            self._annotations.restore(path, shot.marks)
+            if shot.origin:
+                self._origins.remember(
+                    path, shot.origin["serial"], shot.origin["remote"], shot.origin.get("device") or ""
+                )
+        self._gallery.unhide_paths(paths)
+        self._gallery.sync()
+        shown = self._gallery.select_paths(paths)
+        first = Path(paths[0])
+        count = len(restored)
+        extra = "" if shown else f"  ·  in {first.parent.name}"
+        if lost:
+            extra += f"  ·  {lost} couldn't be restored"
+        phone = [(shot, path) for shot, path in restored if shot.on_phone and shot.origin]
+        report = action.report
+        if phone and report is not None and (report.waiting or report.phone_removed):
+            text = "Restored on PC" if count == 1 else f"Restored {count} on PC"
+            if report.waiting:
+                report.restore = lambda: self._restore_on_phones(phone, text, extra)
+                self._notify(f"{text}  ·  the phone is next…{extra}", "ok", 10000)
+            else:
+                self._restore_on_phones(phone, text, extra)
+            return True
+        text = f"Restored  ·  {first.name}" if count == 1 else f"Restored {count} screenshots"
+        self._notify(text + extra, "ok", 2600)
+        return True
+
+    def _restore_on_phones(self, items: list[tuple[DeletedShot, str]], text: str, extra: str) -> None:
+        by_serial: dict[str, list[tuple[str, str]]] = {}
+        for shot, path in items:
+            by_serial.setdefault(shot.origin["serial"], []).append((path, shot.origin["remote"]))
+        live = self._live_phones()
+        self._restore_counter += 1
+        report = RestoreReport(self._restore_counter, text, extra)
+        for key, entries in by_serial.items():
+            if self._adb is None or key not in live:
+                report.offline += len(entries)
+                continue
+            serial = live[key]
+            report.waiting.add(serial)
+            if self._receiver is not None:
+                self._receiver.skip([remote for _path, remote in entries])
+            self._screen_pool.start(
+                PhoneRestoreTask(report.number, self._adb, serial, entries, self._restore_signals)
+            )
+        if not report.waiting:
+            self._finish_restore(report)
+            return
+        self._restores[report.number] = report
+        self._notify(f"{text}  ·  the phone is next…{extra}", "ok", 10000)
+
+    def _on_phone_restored(self, number: int, serial: str, restored: int, _total: int) -> None:
+        report = self._restores.get(number)
+        if report is None:
+            return
+        device = self._device(serial)
+        name = device.name if device is not None else "the phone"
+        if restored and name not in report.names:
+            report.names.append(name)
+        report.restored += restored
+        self._restore_part_done(report, serial)
+
+    def _on_phone_restore_failed(self, number: int, serial: str, message: str) -> None:
+        report = self._restores.get(number)
+        if report is None:
+            return
+        report.errors.append(message)
+        self._restore_part_done(report, serial)
+
+    def _restore_part_done(self, report: RestoreReport, serial: str) -> None:
+        report.waiting.discard(serial)
+        if not report.waiting:
+            self._restores.pop(report.number, None)
+            self._finish_restore(report)
+
+    def _finish_restore(self, report: RestoreReport) -> None:
+        text = report.text
+        kind = "ok"
+        if report.restored:
+            text += f" and {', '.join(report.names)}"
+        if report.offline:
+            text += "  ·  phone not connected, not back there"
+            kind = "error"
+        if report.errors:
+            text += f"  ·  phone: {report.errors[0]}"
+            kind = "error"
+        self._notify(text + report.extra, kind, 3000 if kind == "ok" else 4600)
+
+    def _undo_save(self, action: SaveAction) -> bool:
+        if os.path.exists(action.target):
+            if not self._recycle(action.target):
+                self._history.push(action)
+                self._notify(f"Can't undo  ·  {os.path.basename(action.target)} is in use", "error", 3000)
+                return True
+            self._trashed.pop(action.target, None)
+            self._loader.forget(action.target)
+            self._annotations.forget(action.target)
+            self._gallery.remove_paths([action.target])
+        self._annotations.restore(action.source, action.marks)
+        self._gallery.select_paths([action.source])
+        self._refresh_marks(action.source)
+        self._notify("Save undone  ·  your marks are back on the original", "ok", 2600)
+        return True
+
+    def _undo_mark(self, action: MarkAction) -> bool:
+        if not self._annotations.can_undo(action.key):
+            return False
+        if action.key not in self._displayed_paths:
+            self._gallery.select_paths([action.key])
+        self._annotations.undo(action.key, silent=True)
+        self._refresh_marks(action.key)
+        self._notify(f"Undid the last mark  ·  {os.path.basename(action.key)}", "ok", 2200)
+        return True
+
+    def _refresh_marks(self, key: str) -> None:
+        self._on_annotation_changed(key)
+        if self._fullscreen is not None:
+            self._fullscreen.refresh()
+
+    def _on_mark_event(self, event: str, key: str) -> None:
+        if event == "undo":
+            self._history.drop_mark(key)
+        else:
+            self._history.push(MarkAction(key))
 
     def _queue_pending_trash(self, paths: list[str]) -> None:
         for path in paths:
@@ -1547,9 +1834,9 @@ class MainWindow(QMainWindow):
     def _retry_pending_trash(self) -> None:
         freed = []
         for path in list(self._pending_trash):
-            if not os.path.exists(path) or move_to_trash(path):
+            if not os.path.exists(path) or self._recycle(path):
                 freed.append(path)
-            elif release_file(path) and (move_to_trash(path) or not os.path.exists(path)):
+            elif release_file(path) and (self._recycle(path) or not os.path.exists(path)):
                 freed.append(path)
         if freed:
             self._pending_trash = [path for path in self._pending_trash if path not in freed]
@@ -1579,10 +1866,17 @@ class MainWindow(QMainWindow):
             "on_setup": self.open_network_dialog,
         }
         pcs = {"status": self._pc_status_text()}
-        dialog = SettingsDialog(values, self._on_setting_changed, self._fullscreen or self, network, pcs)
+        dialog = SettingsDialog(
+            values, self._on_setting_changed, self._fullscreen or self, network, pcs, self.open_shortcuts
+        )
         self._settings_dialog = dialog
         dialog.exec()
         self._settings_dialog = None
+        dialog.deleteLater()
+
+    def open_shortcuts(self, parent=None) -> None:
+        dialog = ShortcutsDialog(self._keys, parent or self._fullscreen or self)
+        dialog.exec()
         dialog.deleteLater()
 
     def _on_setting_changed(self, key: str, value) -> None:
@@ -2338,7 +2632,9 @@ class MainWindow(QMainWindow):
             "row": "one image, side by side",
             "files": "separate images",
         }
-        self._copy_button.setToolTip(f"Copy (Ctrl+C)\nSeveral images: {tips[self._copy_layout]}\nUse the arrow to choose")
+        self._copy_button.setToolTip(
+            f"Copy{self._keys.hint('copy')}\nSeveral images: {tips[self._copy_layout]}\nUse the arrow to choose"
+        )
         for key, action in self._copy_actions.items():
             action.setChecked(key == self._copy_layout)
 
@@ -2381,7 +2677,9 @@ class MainWindow(QMainWindow):
         if not saved:
             self._notify("Saving failed", "error")
             return
+        action = SaveAction(source, str(target), self._annotations.snapshot(source))
         self._annotations.forget(source)
+        self._history.push(action)
         self._loader.remember(str(target), QPixmap.fromImage(image))
         thumb = image.scaled(
             self._gallery.thumb_bound(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
@@ -2391,7 +2689,7 @@ class MainWindow(QMainWindow):
         self._show_paths([str(target)], flash=True)
         if self._fullscreen is not None:
             self._fullscreen.refresh()
-        self._notify(f"Saved  ·  {target.name}", "ok")
+        self._notify(f"Saved  ·  {target.name}", "ok", 4000, self._undo_link(action))
 
     def _on_annotation_changed(self, _key: str) -> None:
         self._viewer.update()
@@ -2431,7 +2729,7 @@ class MainWindow(QMainWindow):
         folder = self._folder()
         text = self._path_button.fontMetrics().elidedText(str(folder), Qt.TextElideMode.ElideMiddle, 300)
         self._path_button.setText(text)
-        self._path_button.setToolTip(f"{folder}\nClick to open the folder (Ctrl+O)")
+        self._path_button.setToolTip(f"{folder}\nClick to open the folder{self._keys.hint('open_folder')}")
 
     def open_folder(self) -> None:
         folder = self._folder()
@@ -2450,7 +2748,7 @@ class MainWindow(QMainWindow):
         if self._fullscreen is not None:
             self._fullscreen.close_animated()
             return
-        viewer = FullscreenViewer(self._brush, self._annotations, self)
+        viewer = FullscreenViewer(self._brush, self._annotations, self._keys, self)
         viewer.setWindowIcon(self.windowIcon())
         viewer.view.set_placeholder(*self._placeholder_text())
         viewer.view.set_images(self._viewer.pixmaps(), self._viewer.labels(), self._viewer.keys(), animate=False)
@@ -2461,12 +2759,18 @@ class MainWindow(QMainWindow):
         viewer.capture_requested.connect(self.capture)
         viewer.delete_requested.connect(self.delete_selected)
         viewer.copy_requested.connect(self.copy_selected)
+        viewer.undo_requested.connect(self.undo)
+        viewer.action_requested.connect(self._on_viewer_action)
         viewer.save_marks_requested.connect(self.save_marks)
         viewer.annotation_changed.connect(self._on_annotation_changed)
         viewer.brush_changed.connect(lambda data: self._settings.set("marker", data))
         self._fullscreen = viewer
         self._sync_fullscreen_counter()
         viewer.open_on(self.screen(), marker=bool(marker))
+
+    def _on_viewer_action(self, action: str) -> None:
+        if action in ("first", "last", "unlock"):
+            self._key_handlers()[action]()
 
     def _on_fullscreen_closed(self) -> None:
         self._fullscreen = None
@@ -2483,9 +2787,9 @@ class MainWindow(QMainWindow):
             views.append(self._fullscreen.view)
         return views
 
-    def _notify(self, text: str, kind: str = "info", duration: int = 2000) -> None:
+    def _notify(self, text: str, kind: str = "info", duration: int = 2000, action=None) -> None:
         toast = self._fullscreen.toast if self._fullscreen is not None else self._toast
-        toast.show_message(text, kind, duration)
+        toast.show_message(text, kind, duration, action)
 
     def _restore_geometry(self) -> None:
         stored = self._settings.get("geometry")
@@ -2509,4 +2813,5 @@ class MainWindow(QMainWindow):
             self._fullscreen.close()
         self._link.stop()
         self._stop_workers()
+        clear_copies()
         super().closeEvent(event)

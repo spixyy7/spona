@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from urllib.parse import quote
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 ADB_EXECUTABLE = "adb.exe" if sys.platform == "win32" else "adb"
@@ -326,6 +327,23 @@ class Adb:
 
     def push(self, serial: str, local: Path, remote: str) -> None:
         self._run(["push", str(local), remote], serial=serial, timeout=60)
+
+    def restore_files(self, serial: str, items: list[tuple[str, str]]) -> int:
+        restored = 0
+        for local, remote in items:
+            quoted = shlex.quote(remote)
+            folder = shlex.quote(remote.rsplit("/", 1)[0])
+            check = f"[ -e {quoted} ] && echo KEPT || mkdir -p {folder}"
+            if b"KEPT" in self._run(["shell", check], serial=serial, timeout=10):
+                restored += 1
+                continue
+            self.push(serial, Path(local), remote)
+            storage = "/storage/emulated/0/" + remote[len("/sdcard/"):] if remote.startswith("/sdcard/") else remote
+            address = shlex.quote("file://" + quote(storage))
+            scan = f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {address} >/dev/null 2>&1; true"
+            self._run(["shell", scan], serial=serial, timeout=15)
+            restored += 1
+        return restored
 
     def install_clip_helper(self, serial: str, helper: Path) -> str:
         digest = hashlib.sha1(helper.read_bytes()).hexdigest()[:12]

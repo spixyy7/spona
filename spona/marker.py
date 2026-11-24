@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QLabel, QSlider
 
 from .annotations import MARKER_COLORS, Brush
 from .icons import Glyph
+from .keybinds import Keybinds
 from .widgets import separator, tool_button
 
 COLOR_NAMES = ("Red", "Yellow", "Green", "Blue", "White", "Black")
@@ -79,7 +80,7 @@ class MarkerPanel(QFrame):
     save_requested = Signal()
     done_requested = Signal()
 
-    def __init__(self, brush: Brush, parent=None):
+    def __init__(self, brush: Brush, keys: Keybinds, parent=None):
         super().__init__(parent)
         self.setObjectName("overlay")
         self._brush = brush
@@ -87,8 +88,8 @@ class MarkerPanel(QFrame):
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(4)
 
-        self._pen = tool_button(Glyph.PEN, "Marker (P)", lambda: self.set_tool("pen"))
-        self._eraser = tool_button(Glyph.ERASER, "Eraser (E)", lambda: self.set_tool("eraser"))
+        self._pen = tool_button(Glyph.PEN, f"Marker{keys.hint('pen')}", lambda: self.set_tool("pen"))
+        self._eraser = tool_button(Glyph.ERASER, f"Eraser{keys.hint('eraser')}", lambda: self.set_tool("eraser"))
         tools = QButtonGroup(self)
         for button in (self._pen, self._eraser):
             button.setCheckable(True)
@@ -99,7 +100,7 @@ class MarkerPanel(QFrame):
         self._swatches = QButtonGroup(self)
         for index, (color, name) in enumerate(zip(MARKER_COLORS, COLOR_NAMES), start=1):
             swatch = ColorSwatch(color)
-            swatch.setToolTip(f"{name} ({index})")
+            swatch.setToolTip(f"{name}{keys.hint(f'color{index}')}")
             swatch.clicked.connect(lambda _checked=False, value=color: self.set_color(value))
             self._swatches.addButton(swatch)
             layout.addWidget(swatch)
@@ -107,20 +108,24 @@ class MarkerPanel(QFrame):
 
         self._preview = BrushPreview(brush)
         layout.addWidget(self._preview)
-        self._size_slider, self._size_value = self._slider(layout, "Size", 1, 64, self._on_size, "Size  ( [ and ] or Ctrl+wheel )")
+        wheel = " or ".join(part for part in (keys.text("smaller"), keys.text("bigger"), "Ctrl+wheel") if part)
+        self._size_slider, self._size_value = self._slider(layout, "Size", 1, 64, self._on_size, f"Size ({wheel})")
         self._opacity_slider, self._opacity_value = self._slider(layout, "Opacity", 5, 100, self._on_opacity, "Opacity")
         layout.addWidget(separator())
 
-        self._undo = tool_button(Glyph.UNDO, "Undo (Ctrl+Z)", self.undo_requested.emit)
-        self._redo = tool_button(Glyph.REDO, "Redo (Ctrl+Y)", self.redo_requested.emit)
-        self._clear = tool_button(Glyph.CLEAR, "Clear marks (Delete)", self.clear_requested.emit)
+        self._undo = tool_button(Glyph.UNDO, f"Undo{keys.hint('undo')}", self.undo_requested.emit)
+        self._redo = tool_button(Glyph.REDO, f"Redo{keys.hint('redo')}", self.redo_requested.emit)
+        self._clear = tool_button(Glyph.CLEAR, f"Clear marks{keys.hint('clear_marks')}", self.clear_requested.emit)
         for button in (self._undo, self._redo, self._clear):
             layout.addWidget(button)
         layout.addWidget(separator())
-        layout.addWidget(tool_button(Glyph.COPY, "Copy marked image (Ctrl+C)", self.copy_requested.emit))
-        layout.addWidget(tool_button(Glyph.SAVE, "Save as a new image (Ctrl+S)", self.save_requested.emit, text="Save"))
+        stop = " or ".join(part for part in (keys.text("marker"), "Esc") if part)
+        layout.addWidget(tool_button(Glyph.COPY, f"Copy marked image{keys.hint('copy')}", self.copy_requested.emit))
+        layout.addWidget(
+            tool_button(Glyph.SAVE, f"Save as a new image{keys.hint('save_marks')}", self.save_requested.emit, text="Save")
+        )
         layout.addWidget(separator())
-        layout.addWidget(tool_button(Glyph.ACCEPT, "Stop drawing (M or Esc)", self.done_requested.emit, text="Done"))
+        layout.addWidget(tool_button(Glyph.ACCEPT, f"Stop drawing ({stop})", self.done_requested.emit, text="Done"))
         self.sync()
 
     def _slider(self, layout, title, minimum, maximum, handler, tooltip):

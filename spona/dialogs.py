@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -8,11 +8,15 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QToolButton,
     QVBoxLayout,
 )
 
 from .collage import COPY_LAYOUTS
+from .icons import Glyph
+from .keybinds import ACTIONS, BY_ID, GROUPS, RESERVED, Keybinds, event_key, pretty
 from .theme import style_title_bar
+from .widgets import tool_button
 
 DELETE_MODES = (
     ("ask", "Ask every time"),
@@ -112,7 +116,15 @@ class DeleteDialog(StyledDialog):
 
 
 class SettingsDialog(StyledDialog):
-    def __init__(self, values: dict, on_change, parent=None, network: dict | None = None, pcs: dict | None = None):
+    def __init__(
+        self,
+        values: dict,
+        on_change,
+        parent=None,
+        network: dict | None = None,
+        pcs: dict | None = None,
+        on_shortcuts=None,
+    ):
         super().__init__("Settings", parent, 980)
         self._on_change = on_change
         self._network = network or {}
@@ -181,6 +193,11 @@ class SettingsDialog(StyledDialog):
         close.setDefault(True)
         close.clicked.connect(self.accept)
         buttons = QHBoxLayout()
+        if on_shortcuts is not None:
+            shortcuts = QPushButton("Keyboard shortcuts…")
+            shortcuts.setAutoDefault(False)
+            shortcuts.clicked.connect(lambda: on_shortcuts(self))
+            buttons.addWidget(shortcuts)
         buttons.addStretch(1)
         buttons.addWidget(close)
         layout.addSpacing(10)
@@ -301,6 +318,237 @@ class SettingsDialog(StyledDialog):
         self.accept()
         if callback is not None:
             QTimer.singleShot(0, callback)
+
+
+class KeyChip(QPushButton):
+    recorded = Signal(str)
+    cancelled = Signal()
+    removed = Signal()
+
+    def __init__(self, key: str, parent=None, temporary: bool = False):
+        super().__init__(parent)
+        self.key = key
+        self.temporary = temporary
+        self._recording = False
+        self.setObjectName("key")
+        self.setAutoDefault(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click and press the new keys\nRight-click removes it")
+        self.clicked.connect(self.record)
+        self._show()
+
+    def record(self) -> None:
+        self._recording = True
+        self._show()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def recording(self) -> bool:
+        return self._recording
+
+    def _show(self) -> None:
+        self.setText("Press keys…" if self._recording else pretty(self.key) or "None")
+        self.setProperty("recording", self._recording)
+        self.setProperty("empty", not self.key)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.updateGeometry()
+
+    def _cancel(self) -> None:
+        if self._recording:
+            self._recording = False
+            self._show()
+            self.cancelled.emit()
+
+    def event(self, event):
+        if self._recording and event.type() == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        return super().event(event)
+
+    def focusNextPrevChild(self, forward):
+        return False if self._recording else super().focusNextPrevChild(forward)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._cancel()
+
+    def keyPressEvent(self, event):
+        if not self._recording:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+        key = event_key(event)
+        if key in RESERVED:
+            self._cancel()
+        elif key and not event.isAutoRepeat():
+            self._recording = False
+            self.key = key
+            self._show()
+            self.recorded.emit(key)
+
+    def keyReleaseEvent(self, event):
+        if self._recording:
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        event.accept()
+        self.removed.emit()
+
+
+class ShortcutsDialog(StyledDialog):
+    def __init__(self, keys: Keybinds, parent=None):
+        super().__init__("Keyboard shortcuts", parent, 980)
+        self._keys = keys
+        self._chips: dict[str, QHBoxLayout] = {}
+        self._resets: dict[str, QToolButton] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(6)
+        title = QLabel("Keyboard shortcuts")
+        title.setObjectName("dialogTitle")
+        hint = QLabel("Click a key and press the new one. + adds another key, right-click removes one. Esc stays fixed.")
+        hint.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        columns = QHBoxLayout()
+        columns.setSpacing(30)
+        for group, heading in GROUPS:
+            column = QVBoxLayout()
+            column.setSpacing(3)
+            section = QLabel(heading)
+            section.setObjectName("section")
+            column.addWidget(section)
+            column.addSpacing(2)
+            for action in ACTIONS:
+                if action.group == group:
+                    column.addLayout(self._row(action))
+            column.addStretch(1)
+            columns.addLayout(column, 1)
+        layout.addSpacing(8)
+        layout.addLayout(columns)
+        self._status = QLabel("")
+        self._status.setObjectName("status")
+        self._status.setWordWrap(True)
+        policy = self._status.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self._status.setSizePolicy(policy)
+        self._status.hide()
+        self._reset_all = QPushButton("Reset all")
+        self._reset_all.setAutoDefault(False)
+        self._reset_all.clicked.connect(self._on_reset_all)
+        done = QPushButton("Done")
+        done.setObjectName("primary")
+        done.setAutoDefault(False)
+        done.clicked.connect(self.accept)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addWidget(self._reset_all)
+        buttons.addWidget(self._status, 1)
+        buttons.addWidget(done)
+        layout.addSpacing(8)
+        layout.addLayout(buttons)
+        self._fill()
+
+    def _row(self, action) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        label = QLabel(action.label)
+        chips = QHBoxLayout()
+        chips.setSpacing(4)
+        add = tool_button(Glyph.ADD, "Add another key", lambda: self._add(action.id), icon_size=12)
+        reset = tool_button(Glyph.RESET, "", lambda: self._reset(action.id), icon_size=12)
+        defaults = " or ".join(pretty(key) for key in action.defaults)
+        reset.setToolTip(f"Back to {defaults}")
+        policy = reset.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        reset.setSizePolicy(policy)
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addLayout(chips)
+        row.addWidget(add)
+        row.addWidget(reset)
+        self._chips[action.id] = chips
+        self._resets[action.id] = reset
+        return row
+
+    def _fill(self) -> None:
+        for identity in self._chips:
+            self._fill_row(identity)
+        self._reset_all.setEnabled(self._keys.any_customized())
+
+    def _fill_row(self, identity: str) -> None:
+        chips = self._chips[identity]
+        while chips.count():
+            widget = chips.takeAt(0).widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        for key in self._keys.keys(identity) or [""]:
+            chips.addWidget(self._chip(identity, key))
+        self._resets[identity].setVisible(self._keys.customized(identity))
+
+    def _chip(self, identity: str, key: str, temporary: bool = False) -> KeyChip:
+        chip = KeyChip(key, self, temporary)
+        chip.recorded.connect(lambda new, old=key: self._record(identity, old, new))
+        chip.cancelled.connect(lambda: self._cancelled(identity, chip))
+        chip.removed.connect(lambda: self._remove(identity, key))
+        return chip
+
+    def _cancelled(self, identity: str, chip: KeyChip) -> None:
+        if chip.temporary:
+            chip.hide()
+            self._chips[identity].removeWidget(chip)
+            chip.deleteLater()
+
+    def _add(self, identity: str) -> None:
+        if not self._keys.keys(identity):
+            self._chips[identity].itemAt(0).widget().record()
+            return
+        chip = self._chip(identity, "", temporary=True)
+        self._chips[identity].addWidget(chip)
+        chip.record()
+
+    def _record(self, identity: str, old: str, new: str) -> None:
+        keys = self._keys.keys(identity)
+        if old in keys:
+            keys[keys.index(old)] = new
+        else:
+            keys.append(new)
+        taken = self._keys.set_keys(identity, keys)
+        text = f"{BY_ID[identity].label}  ·  {pretty(new)}"
+        if taken:
+            text += "  ·  taken from " + ", ".join(label for _key, label in taken)
+        self._say(text, "ok")
+        QTimer.singleShot(0, self._fill)
+
+    def _remove(self, identity: str, key: str) -> None:
+        if not key:
+            return
+        self._keys.set_keys(identity, [existing for existing in self._keys.keys(identity) if existing != key])
+        self._say(f"{BY_ID[identity].label}  ·  {pretty(key)} removed")
+        QTimer.singleShot(0, self._fill)
+
+    def _reset(self, identity: str) -> None:
+        taken = self._keys.reset(identity)
+        text = f"{BY_ID[identity].label}  ·  back to {' or '.join(pretty(key) for key in self._keys.keys(identity))}"
+        if taken:
+            text += "  ·  taken from " + ", ".join(label for _key, label in taken)
+        self._say(text, "ok")
+        self._fill()
+
+    def _on_reset_all(self) -> None:
+        self._keys.reset_all()
+        self._say("All shortcuts are back to default", "ok")
+        self._fill()
+
+    def _say(self, text: str, kind: str = "info") -> None:
+        self._status.setText(text)
+        self._status.setProperty("kind", kind)
+        self._status.style().unpolish(self._status)
+        self._status.style().polish(self._status)
+        self._status.show()
 
 
 class SecretDialog(QDialog):
