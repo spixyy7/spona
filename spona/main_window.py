@@ -1641,7 +1641,11 @@ class MainWindow(QMainWindow):
 
     def _finish_delete(self, report: DeleteReport) -> None:
         if report.restore is not None:
-            report.restore()
+            phone, text, extra = report.restore
+            if report.phone_removed:
+                self._restore_on_phones(phone, text, extra)
+            else:
+                self._notify(text + extra, "ok", 2600)
             return
         text, kind = delete_summary(report)
         if report.action is None:
@@ -1715,7 +1719,7 @@ class MainWindow(QMainWindow):
         if phone and report is not None and (report.waiting or report.phone_removed):
             text = "Restored on PC" if count == 1 else f"Restored {count} on PC"
             if report.waiting:
-                report.restore = lambda: self._restore_on_phones(phone, text, extra)
+                report.restore = (phone, text, extra)
                 self._notify(f"{text}  ·  the phone is next…{extra}", "ok", 10000)
             else:
                 self._restore_on_phones(phone, text, extra)

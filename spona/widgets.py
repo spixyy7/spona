@@ -222,7 +222,7 @@ class Toast(QLabel):
         if callback is not None:
             self._timer.stop()
             self._fade_to(0.0)
-            callback()
+            QTimer.singleShot(0, callback)
 
     def enterEvent(self, event):
         super().enterEvent(event)

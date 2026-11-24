@@ -31,6 +31,8 @@ MODIFIER_KEYS = {
     Qt.Key.Key_unknown,
 }
 RESERVED = ("Esc",)
+ALT_GR = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+SHIFT = "Shift+"
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,9 @@ def event_key(event) -> str:
     modifiers = event.modifiers() & ~(
         Qt.KeyboardModifier.KeypadModifier | Qt.KeyboardModifier.GroupSwitchModifier
     )
+    text = event.text()
+    if modifiers & ALT_GR == ALT_GR and text and text.isprintable():
+        modifiers &= ~ALT_GR
     return normal(QKeySequence(QKeyCombination(modifiers, key)).toString(PORTABLE))
 
 
@@ -181,6 +186,13 @@ class Keybinds(QObject):
         key = event_key(event)
         if not key:
             return None
+        found = self._find(key, scope)
+        plain = key.removeprefix(SHIFT)
+        if found is None and plain != key and len(plain) == 1 and not plain.isalpha():
+            found = self._find(plain, scope)
+        return found
+
+    def _find(self, key: str, scope: str) -> str | None:
         for action in ACTIONS:
             if scope in action.scopes and key in self.keys(action.id):
                 return action.id
